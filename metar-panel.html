@@ -1,0 +1,11 @@
+<!-- partials/metar-panel.html
+     Unchanged from the current inline markup in aircraft3d.html — moved here so the METAR
+     module's DOM contract (see mountDefaultDom() in modules/metar.js) lives next to the
+     module that owns it. Include this fragment wherever #metarPanel currently sits. -->
+<div id="metarPanel" style="position:fixed; right:14px; top:78px; z-index:30; display:none; flex-direction:column; width:min(92vw,360px); max-height:calc(80vh - 78px); overflow-y:auto; background:var(--bg-mid); border:1px solid var(--border); border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,0.55); font-family:'Courier New',monospace; color:var(--text);">
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid var(--border);">
+    <div id="metarStationName" style="font-size:13px; font-weight:bold; color:var(--accent);">METAR</div>
+    <button id="metarPanelCloseBtn" type="button" style="background:var(--bg-light); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; font-family:'Courier New',monospace; font-size:11px; cursor:pointer;">✕</button>
+  </div>
+  <div id="metarBody" style="padding:10px 12px;"></div>
+</div>
