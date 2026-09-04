@@ -1,0 +1,15 @@
+{
+  "appId": "net.airplot.blackbox",
+  "appName": "Airplot Flight Recorder",
+  "webDir": "www",
+  "server": {
+    "url": "https://airplot.net/blackbox.html",
+    "allowNavigation": [
+      "airplot.net",
+      "*.airplot.net"
+    ]
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
