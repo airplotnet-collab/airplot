@@ -11,6 +11,8 @@ on:
       - '.github/workflows/build-android.yml'
   workflow_dispatch: {} # lets you trigger a rebuild manually from the Actions tab with no code change
 
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -55,6 +57,20 @@ jobs:
           name: airplot-debug-apk
           path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
+      # Publishes the same debug APK to a stable "latest" GitHub Release so it can be linked
+      # from blackbox.html with a fixed, unauthenticated URL:
+      #   https://github.com/<owner>/<repo>/releases/latest/download/app-debug.apk
+      # Re-running this overwrites the existing "latest" release's assets rather than creating
+      # a new release each time.
+      - name: Publish debug APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          make_latest: true
+          files: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Release build — only runs once a signing keystore is added as repo secrets (Settings >
       # Secrets and variables > Actions). Until then this step is skipped entirely rather than
@@ -96,3 +112,15 @@ jobs:
           name: airplot-release-apk
           path: android-app/android/app/build/outputs/apk/release/app-release.apk
           retention-days: 90
+      - name: Publish release APK to Release
+        if: ${{ env.HAS_SIGNING == 'true' }}
+        env:
+          HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          make_latest: true
+          files: android-app/android/app/build/outputs/apk/release/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
