@@ -16,7 +16,28 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        // Explicitly pointed at a keystore committed to this repo (debug.keystore, right next
+        // to this file), rather than letting Gradle auto-generate one at ~/.android/debug.keystore
+        // per machine. Every GitHub Actions run is a fresh, ephemeral VM with no persistence
+        // between runs, so without this the debug build's signing certificate — and therefore
+        // its SHA-1 fingerprint — would change on every single build. That fingerprint has to
+        // stay fixed for native Google Sign-In, which is registered in Google Cloud Console
+        // against one specific SHA-1 per package name. Uses Android's own standard, well-known
+        // debug credentials (alias/password "androiddebugkey"/"android") — fine for a debug
+        // keystore, which was never meant to be a real security boundary; only the eventual
+        // release keystore needs to be a genuine, kept-secret credential.
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

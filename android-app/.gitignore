@@ -6,3 +6,8 @@ android/local.properties
 android/app/release.jks
 *.jks
 *.keystore
+# The debug keystore IS meant to be committed — its SHA-1 has to stay fixed across every CI
+# run for native Google Sign-In (registered in Google Cloud Console against one fingerprint).
+# This is Android's own standard, non-secret debug credentials, not a real signing key —
+# *.jks and release.jks above still correctly keep any actual release keystore out.
+!android/app/debug.keystore
