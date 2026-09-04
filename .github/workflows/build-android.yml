@@ -114,8 +114,6 @@ jobs:
           retention-days: 90
       - name: Publish release APK to Release
         if: ${{ env.HAS_SIGNING == 'true' }}
-        env:
-          HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
@@ -123,4 +121,5 @@ jobs:
           make_latest: true
           files: android-app/android/app/build/outputs/apk/release/app-release.apk
         env:
+          HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
