@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Airplot Flight Recorder</string>
+    <string name="title_activity_main">Airplot Flight Recorder</string>
+    <string name="package_name">net.airplot.blackbox</string>
+    <string name="custom_url_scheme">net.airplot.blackbox</string>
+</resources>
