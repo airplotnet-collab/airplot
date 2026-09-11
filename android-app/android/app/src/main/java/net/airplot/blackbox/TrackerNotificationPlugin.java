@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.Color;
 import android.os.Build;
 import android.widget.RemoteViews;
 import androidx.core.app.NotificationCompat;
@@ -17,9 +18,10 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-// Persistent "quick controls" notification - shows current mode/speed/altitude and time since
-// the last transmission, with a big Record/Stop square button, so recording can be checked or
-// toggled from the notification shade without opening the app. This plugin holds no
+// Persistent "quick controls" notification - shows current mode/speed/altitude/heading and time
+// since the last transmission, with a big Record/Stop square button, so recording can be checked
+// or toggled from the notification shade without opening the app. Text color flips from green
+// (idle) to red (recording) as an at-a-glance state indicator. This plugin holds no
 // track/recording state of its own - it's driven entirely by blackbox.html calling
 // show()/update()/hide() and listening for the "toggleRecord" event when the button is tapped.
 @CapacitorPlugin(name = "TrackerNotification")
@@ -28,6 +30,11 @@ public class TrackerNotificationPlugin extends Plugin {
     private static final String CHANNEL_ID = "airplot_quick_controls";
     private static final int NOTIF_ID = 4242;
     private static final String ACTION_TOGGLE = "net.airplot.blackbox.ACTION_TOGGLE_RECORD";
+
+    private static final int COLOR_IDLE_TITLE = Color.parseColor("#2E7D32");
+    private static final int COLOR_IDLE_TEXT = Color.parseColor("#388E3C");
+    private static final int COLOR_REC_TITLE = Color.parseColor("#C62828");
+    private static final int COLOR_REC_TEXT = Color.parseColor("#D32F2F");
 
     private BroadcastReceiver receiver;
 
@@ -63,7 +70,7 @@ public class TrackerNotificationPlugin extends Plugin {
 
     @PluginMethod
     public void show(PluginCall call) {
-        render("-", "-", "\u2014", false, "Aviation");
+        render("-", "-", "\u2014", false, "Aviation", "-", "");
         call.resolve();
     }
 
@@ -73,8 +80,10 @@ public class TrackerNotificationPlugin extends Plugin {
         String altitude = call.getString("altitude", "-");
         String lastTransmit = call.getString("lastTransmit", "\u2014");
         String mode = call.getString("mode", "Aviation");
+        String heading = call.getString("heading", "-");
+        String overdue = call.getString("overdue", "");
         Boolean recording = call.getBoolean("recording", false);
-        render(speed, altitude, lastTransmit, recording != null && recording, mode);
+        render(speed, altitude, lastTransmit, recording != null && recording, mode, heading, overdue);
         call.resolve();
     }
 
@@ -84,7 +93,7 @@ public class TrackerNotificationPlugin extends Plugin {
         call.resolve();
     }
 
-    private void render(String speed, String altitude, String lastTransmit, boolean recording, String mode) {
+    private void render(String speed, String altitude, String lastTransmit, boolean recording, String mode, String heading, String overdue) {
         Context context = getContext();
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
 
@@ -97,14 +106,21 @@ public class TrackerNotificationPlugin extends Plugin {
         Intent openAppIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
         PendingIntent contentPending = PendingIntent.getActivity(context, 1, openAppIntent, flags);
 
-        String title = recording ? ("Recording \u00b7 " + speed + " \u00b7 " + altitude) : "Airplot idle";
-        String text = "Last transmit: " + lastTransmit;
+        String title = recording
+            ? ("Recording \u00b7 " + speed + " \u00b7 " + altitude + " \u00b7 " + heading)
+            : "Airplot idle";
+        String text = "Last transmit: " + lastTransmit
+            + ((overdue != null && !overdue.isEmpty()) ? ("  \u00b7  " + overdue) : "");
         String btnLabel = recording ? "STOP" : "REC";
         int btnBg = recording ? R.drawable.notif_btn_stop : R.drawable.notif_btn_record;
+        int titleColor = recording ? COLOR_REC_TITLE : COLOR_IDLE_TITLE;
+        int textColor = recording ? COLOR_REC_TEXT : COLOR_IDLE_TEXT;
 
         RemoteViews compact = new RemoteViews(context.getPackageName(), R.layout.notification_quick_controls);
         compact.setTextViewText(R.id.notif_title, title);
         compact.setTextViewText(R.id.notif_text, text);
+        compact.setInt(R.id.notif_title, "setTextColor", titleColor);
+        compact.setInt(R.id.notif_text, "setTextColor", textColor);
         compact.setTextViewText(R.id.notif_action_btn, btnLabel);
         compact.setInt(R.id.notif_action_btn, "setBackgroundResource", btnBg);
         compact.setOnClickPendingIntent(R.id.notif_action_btn, togglePending);
@@ -113,6 +129,9 @@ public class TrackerNotificationPlugin extends Plugin {
         big.setTextViewText(R.id.notif_title_big, title);
         big.setTextViewText(R.id.notif_text_big, text);
         big.setTextViewText(R.id.notif_mode_big, "Mode: " + mode);
+        big.setInt(R.id.notif_title_big, "setTextColor", titleColor);
+        big.setInt(R.id.notif_text_big, "setTextColor", textColor);
+        big.setInt(R.id.notif_mode_big, "setTextColor", textColor);
         big.setTextViewText(R.id.notif_action_btn_big, btnLabel);
         big.setInt(R.id.notif_action_btn_big, "setBackgroundResource", btnBg);
         big.setOnClickPendingIntent(R.id.notif_action_btn_big, togglePending);

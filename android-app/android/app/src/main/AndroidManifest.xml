@@ -54,4 +54,5 @@
     <!-- Android 13+ requires this to show the "Tracking active" notification the foreground
          service depends on to keep running. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 </manifest>
