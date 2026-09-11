@@ -16,7 +16,7 @@
             android:id="@+id/notif_title_big"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#DE000000"
+            android:textColor="#2E7D32"
             android:textSize="15sp"
             android:textStyle="bold" />
 
@@ -24,7 +24,7 @@
             android:id="@+id/notif_text_big"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#99000000"
+            android:textColor="#388E3C"
             android:textSize="13sp"
             android:layout_marginTop="2dp" />
 
@@ -32,7 +32,7 @@
             android:id="@+id/notif_mode_big"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#99000000"
+            android:textColor="#388E3C"
             android:textSize="13sp"
             android:layout_marginTop="2dp" />
     </LinearLayout>

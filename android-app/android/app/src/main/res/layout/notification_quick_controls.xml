@@ -19,7 +19,7 @@
             android:id="@+id/notif_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#DE000000"
+            android:textColor="#2E7D32"
             android:textSize="14sp"
             android:textStyle="bold"
             android:maxLines="1"
@@ -29,7 +29,7 @@
             android:id="@+id/notif_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#99000000"
+            android:textColor="#388E3C"
             android:textSize="12sp"
             android:maxLines="1"
             android:ellipsize="end" />
