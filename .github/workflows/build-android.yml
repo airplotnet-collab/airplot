@@ -57,11 +57,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: airplot-debug-apk
-          path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+          path: android-app/android/app/build/outputs/apk/debug/Airplot-Blackbox-debug.apk
           retention-days: 30
       # Publishes the same debug APK to a stable "latest" GitHub Release so it can be linked
       # from blackbox.html with a fixed, unauthenticated URL:
-      #   https://github.com/<owner>/<repo>/releases/latest/download/app-debug.apk
+      #   https://github.com/<owner>/<repo>/releases/latest/download/Airplot-Blackbox-debug.apk
       # Re-running this overwrites the existing "latest" release's assets rather than creating
       # a new release each time.
       - name: Publish debug APK to Release
@@ -70,7 +70,7 @@ jobs:
           tag_name: latest
           name: Latest build
           make_latest: true
-          files: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+          files: android-app/android/app/build/outputs/apk/debug/Airplot-Blackbox-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -112,7 +112,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: airplot-release-apk
-          path: android-app/android/app/build/outputs/apk/release/app-release.apk
+          path: android-app/android/app/build/outputs/apk/release/Airplot-Blackbox-release.apk
           retention-days: 90
       - name: Publish release APK to Release
         if: ${{ env.HAS_SIGNING == 'true' }}
@@ -121,7 +121,7 @@ jobs:
           tag_name: latest
           name: Latest build
           make_latest: true
-          files: android-app/android/app/build/outputs/apk/release/app-release.apk
+          files: android-app/android/app/build/outputs/apk/release/Airplot-Blackbox-release.apk
         env:
           HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
