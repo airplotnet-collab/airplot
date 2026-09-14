@@ -43,6 +43,15 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // Renames the built APK from Gradle's default app-debug.apk/app-release.apk to
+    // Airplot-Blackbox-<buildtype>.apk. The workflow's Upload/Publish steps and blackbox.html's
+    // apkUrl download link both reference this exact filename - keep them in sync if renamed
+    // again.
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "Airplot-Blackbox-${variant.buildType.name}.apk"
+        }
+    }
 }
 
 repositories {
