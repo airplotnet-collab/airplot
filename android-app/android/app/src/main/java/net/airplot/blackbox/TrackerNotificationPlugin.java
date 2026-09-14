@@ -9,6 +9,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
 import android.view.View;
 import android.widget.RemoteViews;
 import androidx.core.app.NotificationCompat;
@@ -25,12 +28,22 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 // square button. Text color flips from green (idle) to red (recording) as an at-a-glance state
 // indicator. This plugin holds no track/recording state of its own - it's driven entirely by
 // blackbox.html calling show()/update()/hide() and listening for "toggleRecord" on tap.
+//
+// Also exposes alert() - a separate, best-effort native vibrate + heads-up sound notification
+// for Mayday/overdue alerts. blackbox.html's own Web Audio + navigator.vibrate() chime only
+// works while the WebView is in the foreground (Android suspends both APIs once the app is
+// backgrounded, same restriction any web page would have). alert() runs entirely in native
+// code, so it keeps working while the app is minimized - the same way the background location
+// service keeps running independent of the WebView being visible.
 @CapacitorPlugin(name = "TrackerNotification")
 public class TrackerNotificationPlugin extends Plugin {
 
     private static final String CHANNEL_ID = "airplot_quick_controls";
     private static final int NOTIF_ID = 4242;
     private static final String ACTION_TOGGLE = "net.airplot.blackbox.ACTION_TOGGLE_RECORD";
+
+    private static final String ALERT_CHANNEL_ID = "airplot_alerts";
+    private static final int ALERT_NOTIF_ID = 4243;
 
     private static final int COLOR_IDLE_TITLE = Color.parseColor("#2E7D32");
     private static final int COLOR_IDLE_TEXT = Color.parseColor("#388E3C");
@@ -42,6 +55,7 @@ public class TrackerNotificationPlugin extends Plugin {
     @Override
     public void load() {
         createChannel();
+        createAlertChannel();
         receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context ctx, Intent intent) {
@@ -69,6 +83,21 @@ public class TrackerNotificationPlugin extends Plugin {
         }
     }
 
+    // Separate HIGH-importance channel so alert() actually pops up with sound - the quick
+    // controls channel above is deliberately LOW/silent and would never do that.
+    private void createAlertChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                ALERT_CHANNEL_ID, "Flight Alerts", NotificationManager.IMPORTANCE_HIGH
+            );
+            channel.setDescription("Overdue / Mayday alerts - sound and vibration.");
+            channel.enableVibration(true);
+            channel.setVibrationPattern(new long[]{0, 200, 100, 200, 100, 400});
+            NotificationManager nm = getContext().getSystemService(NotificationManager.class);
+            nm.createNotificationChannel(channel);
+        }
+    }
+
     @PluginMethod
     public void show(PluginCall call) {
         render("-", "-", "\u2014", false, "Aviation", "-", "");
@@ -91,6 +120,57 @@ public class TrackerNotificationPlugin extends Plugin {
     @PluginMethod
     public void hide(PluginCall call) {
         NotificationManagerCompat.from(getContext()).cancel(NOTIF_ID);
+        call.resolve();
+    }
+
+    // Best-effort native vibrate + heads-up alert notification. Runs entirely outside the
+    // WebView, so unlike blackbox.html's own navigator.vibrate()/Web Audio chime, this keeps
+    // working while the app is backgrounded/minimized.
+    @PluginMethod
+    public void alert(PluginCall call) {
+        boolean urgent = Boolean.TRUE.equals(call.getBoolean("urgent", false));
+        String title = call.getString("title", urgent ? "MAYDAY" : "Alert");
+        String text = call.getString("text", "");
+
+        try {
+            long[] pattern = urgent
+                ? new long[]{0, 200, 100, 200, 100, 400}
+                : new long[]{0, 150, 80, 150};
+            Vibrator vibrator = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                VibratorManager vm = (VibratorManager) getContext().getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                if (vm != null) vibrator = vm.getDefaultVibrator();
+            } else {
+                vibrator = (Vibrator) getContext().getSystemService(Context.VIBRATOR_SERVICE);
+            }
+            if (vibrator != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1));
+                } else {
+                    vibrator.vibrate(pattern, -1);
+                }
+            }
+        } catch (Exception e) {
+            // Best-effort - a vibration failure shouldn't block the notification below.
+        }
+
+        try {
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+            Intent openAppIntent = getContext().getPackageManager().getLaunchIntentForPackage(getContext().getPackageName());
+            PendingIntent contentPending = PendingIntent.getActivity(getContext(), 2, openAppIntent, flags);
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), ALERT_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: swap for the app's own small icon once one exists
+                .setContentTitle(title)
+                .setContentText(text)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(contentPending);
+            NotificationManagerCompat.from(getContext()).notify(ALERT_NOTIF_ID, builder.build());
+        } catch (Exception e) {
+            // Best-effort - vibration above still fires even if the notification post fails.
+        }
+
         call.resolve();
     }
 
@@ -160,7 +240,7 @@ public class TrackerNotificationPlugin extends Plugin {
             .setStyle(new NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(compact)
             .setCustomBigContentView(big)
-            .setOngoing(recording)
+            .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(contentPending);
