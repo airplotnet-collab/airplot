@@ -41,6 +41,7 @@ public class TrackerNotificationPlugin extends Plugin {
     private static final String CHANNEL_ID = "airplot_quick_controls";
     private static final int NOTIF_ID = 4242;
     private static final String ACTION_TOGGLE = "net.airplot.blackbox.ACTION_TOGGLE_RECORD";
+    private static final String ACTION_SNOOZE = "net.airplot.blackbox.ACTION_SNOOZE_OVERDUE";
 
     private static final String ALERT_CHANNEL_ID = "airplot_alerts";
     private static final int ALERT_NOTIF_ID = 4243;
@@ -61,10 +62,17 @@ public class TrackerNotificationPlugin extends Plugin {
             public void onReceive(Context ctx, Intent intent) {
                 if (ACTION_TOGGLE.equals(intent.getAction())) {
                     notifyListeners("toggleRecord", new JSObject());
+                } else if (ACTION_SNOOZE.equals(intent.getAction())) {
+                    // blackbox.html owns the actual snooze logic (pushing the overdue time
+                    // forward, clearing overdueNotified, re-arming the countdown) - this just
+                    // relays the tap. setAutoCancel(true) on the action's own PendingIntent
+                    // dismisses the notification itself.
+                    notifyListeners("snoozeOverdue", new JSObject());
                 }
             }
         };
         IntentFilter filter = new IntentFilter(ACTION_TOGGLE);
+        filter.addAction(ACTION_SNOOZE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getContext().registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -92,7 +100,7 @@ public class TrackerNotificationPlugin extends Plugin {
             );
             channel.setDescription("Overdue / Mayday alerts - sound and vibration.");
             channel.enableVibration(true);
-            channel.setVibrationPattern(new long[]{0, 200, 100, 200, 100, 400});
+            channel.setVibrationPattern(new long[]{0, 300, 150, 300, 150, 300, 150, 600});
             NotificationManager nm = getContext().getSystemService(NotificationManager.class);
             nm.createNotificationChannel(channel);
         }
@@ -125,17 +133,22 @@ public class TrackerNotificationPlugin extends Plugin {
 
     // Best-effort native vibrate + heads-up alert notification. Runs entirely outside the
     // WebView, so unlike blackbox.html's own navigator.vibrate()/Web Audio chime, this keeps
-    // working while the app is backgrounded/minimized.
+    // working while the app is backgrounded/minimized. showSnooze adds a "Snooze +15 min"
+    // action button directly on the notification (overdue alerts only - doesn't make sense
+    // for a Mayday, which isn't on a timer).
     @PluginMethod
     public void alert(PluginCall call) {
         boolean urgent = Boolean.TRUE.equals(call.getBoolean("urgent", false));
+        boolean showSnooze = Boolean.TRUE.equals(call.getBoolean("showSnooze", false));
         String title = call.getString("title", urgent ? "MAYDAY" : "Alert");
         String text = call.getString("text", "");
 
         try {
+            // Longer, more insistent patterns than a single one-shot buzz - more pulses and
+            // a longer final buzz, so it's harder to miss/mistake for a routine notification.
             long[] pattern = urgent
-                ? new long[]{0, 200, 100, 200, 100, 400}
-                : new long[]{0, 150, 80, 150};
+                ? new long[]{0, 300, 150, 300, 150, 300, 150, 600}
+                : new long[]{0, 200, 100, 200, 100, 200};
             Vibrator vibrator = null;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 VibratorManager vm = (VibratorManager) getContext().getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
@@ -166,6 +179,11 @@ public class TrackerNotificationPlugin extends Plugin {
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setAutoCancel(true)
                 .setContentIntent(contentPending);
+            if (showSnooze) {
+                Intent snoozeIntent = new Intent(ACTION_SNOOZE).setPackage(getContext().getPackageName());
+                PendingIntent snoozePending = PendingIntent.getBroadcast(getContext(), 3, snoozeIntent, flags);
+                builder.addAction(0, "Snooze +15 min", snoozePending);
+            }
             NotificationManagerCompat.from(getContext()).notify(ALERT_NOTIF_ID, builder.build());
         } catch (Exception e) {
             // Best-effort - vibration above still fires even if the notification post fails.
