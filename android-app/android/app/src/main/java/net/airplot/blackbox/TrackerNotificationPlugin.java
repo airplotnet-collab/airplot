@@ -9,6 +9,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -42,6 +44,10 @@ public class TrackerNotificationPlugin extends Plugin {
     private static final int NOTIF_ID = 4242;
     private static final String ACTION_TOGGLE = "net.airplot.blackbox.ACTION_TOGGLE_RECORD";
     private static final String ACTION_SNOOZE = "net.airplot.blackbox.ACTION_SNOOZE_OVERDUE";
+    private static final String ACTION_CLOSE = "net.airplot.blackbox.ACTION_CLOSE_APP";
+    // Service started by @capacitor-community/background-geolocation - stopped on Close so
+    // the location notification goes away with the app.
+    private static final String GEO_SERVICE_CLASS = "com.equimaps.capacitor_background_geolocation.BackgroundGeolocationService";
 
     private static final String ALERT_CHANNEL_ID = "airplot_alerts";
     private static final int ALERT_NOTIF_ID = 4243;
@@ -52,6 +58,10 @@ public class TrackerNotificationPlugin extends Plugin {
     private static final int COLOR_REC_TEXT = Color.parseColor("#D32F2F");
 
     private BroadcastReceiver receiver;
+    // Last recording state sent by blackbox.html - Close is hidden and ignored while recording.
+    private volatile boolean lastRecording = false;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable pendingExit;
 
     @Override
     public void load() {
@@ -68,11 +78,20 @@ public class TrackerNotificationPlugin extends Plugin {
                     // relays the tap. setAutoCancel(true) on the action's own PendingIntent
                     // dismisses the notification itself.
                     notifyListeners("snoozeOverdue", new JSObject());
+                } else if (ACTION_CLOSE.equals(intent.getAction())) {
+                    if (lastRecording) return; // button is hidden while recording; ignore a stale tap
+                    // blackbox.html stops GPS and calls exitApp(). If the page doesn't answer
+                    // (WebView suspended or gone), close anyway after 3 seconds.
+                    notifyListeners("closeApp", new JSObject());
+                    if (pendingExit != null) handler.removeCallbacks(pendingExit);
+                    pendingExit = TrackerNotificationPlugin.this::exitNow;
+                    handler.postDelayed(pendingExit, 3000);
                 }
             }
         };
         IntentFilter filter = new IntentFilter(ACTION_TOGGLE);
         filter.addAction(ACTION_SNOOZE);
+        filter.addAction(ACTION_CLOSE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getContext().registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -129,6 +148,32 @@ public class TrackerNotificationPlugin extends Plugin {
     public void hide(PluginCall call) {
         NotificationManagerCompat.from(getContext()).cancel(NOTIF_ID);
         call.resolve();
+    }
+
+    // Called by blackbox.html after the notification's Close button, once GPS is stopped.
+    @PluginMethod
+    public void exitApp(PluginCall call) {
+        call.resolve();
+        handler.post(this::exitNow);
+    }
+
+    // Removes the notifications, stops the background location service, closes the app
+    // (also removing it from Recents) and ends the process.
+    private void exitNow() {
+        if (pendingExit != null) { handler.removeCallbacks(pendingExit); pendingExit = null; }
+        Context ctx = getContext();
+        try {
+            NotificationManagerCompat.from(ctx).cancel(NOTIF_ID);
+            NotificationManagerCompat.from(ctx).cancel(ALERT_NOTIF_ID);
+        } catch (Exception e) { /* best-effort */ }
+        try {
+            ctx.stopService(new Intent().setClassName(ctx.getPackageName(), GEO_SERVICE_CLASS));
+        } catch (Exception e) { /* service not running, or a different plugin version */ }
+        try {
+            android.app.Activity act = getActivity();
+            if (act != null) act.finishAndRemoveTask();
+        } catch (Exception e) { /* best-effort */ }
+        handler.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 400);
     }
 
     // Best-effort native vibrate + heads-up alert notification. Runs entirely outside the
@@ -195,6 +240,12 @@ public class TrackerNotificationPlugin extends Plugin {
     private void render(String speed, String altitude, String lastTransmit, boolean recording, String mode, String heading, String overdue) {
         Context context = getContext();
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        lastRecording = recording;
+
+        // Close button - hidden while recording, so a stray tap can't end a trip mid-flight.
+        Intent closeIntent = new Intent(ACTION_CLOSE).setPackage(context.getPackageName());
+        PendingIntent closePending = PendingIntent.getBroadcast(context, 4, closeIntent, flags);
+        int closeVisibility = recording ? View.GONE : View.VISIBLE;
 
         // Explicit package on the toggle Intent - without this, some devices (particularly
         // OEM-customized Android builds with aggressive background restrictions) can silently
@@ -228,6 +279,8 @@ public class TrackerNotificationPlugin extends Plugin {
         compact.setTextViewText(R.id.notif_action_btn, btnLabel);
         compact.setInt(R.id.notif_action_btn, "setBackgroundResource", btnBg);
         compact.setOnClickPendingIntent(R.id.notif_action_btn, togglePending);
+        compact.setOnClickPendingIntent(R.id.notif_close_btn, closePending);
+        compact.setViewVisibility(R.id.notif_close_btn, closeVisibility);
 
         RemoteViews big = new RemoteViews(context.getPackageName(), R.layout.notification_quick_controls_big);
         big.setTextViewText(R.id.notif_title_big, title);
@@ -250,6 +303,8 @@ public class TrackerNotificationPlugin extends Plugin {
         big.setTextViewText(R.id.notif_action_btn_big, btnLabel);
         big.setInt(R.id.notif_action_btn_big, "setBackgroundResource", btnBg);
         big.setOnClickPendingIntent(R.id.notif_action_btn_big, togglePending);
+        big.setOnClickPendingIntent(R.id.notif_close_btn_big, closePending);
+        big.setViewVisibility(R.id.notif_close_btn_big, closeVisibility);
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: swap for the app's own small icon once one exists
