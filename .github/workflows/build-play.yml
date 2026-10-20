@@ -57,28 +57,71 @@ jobs:
         run: chmod +x android/gradlew
 
       - name: Decode upload keystore
-        run: echo "${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > android/app/play-upload.jks
+        run: echo "${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/play-upload.jks"
 
-      # Play rejects any upload whose versionCode is not higher than the previous one.
-      # The run number of this workflow always goes up, so it is used as the versionCode.
+      # Adds a release signing config and version number to build.gradle on this runner only.
+      # The change is never committed, so the repo's build.gradle and the debug APK are untouched.
+      # Play rejects any upload whose versionCode is not higher than the previous one, so the
+      # run number of this workflow (always increasing) is used as the versionCode.
+      - name: Add Play signing config (runner only, not committed)
+        run: |
+          cat >> android/app/build.gradle <<'EOF'
+
+          // ---- Added at build time by build-play.yml only. Never committed. ----
+          android {
+              signingConfigs {
+                  play {
+                      storeFile file(System.getenv("PLAY_KS_FILE"))
+                      storePassword System.getenv("PLAY_KS_PASS")
+                      keyAlias System.getenv("PLAY_KEY_ALIAS")
+                      keyPassword System.getenv("PLAY_KEY_PASS")
+                  }
+              }
+              defaultConfig {
+                  versionCode Integer.parseInt(System.getenv("PLAY_VERSION_CODE"))
+                  versionName "1.0." + System.getenv("PLAY_VERSION_CODE")
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.play
+                  }
+              }
+          }
+          EOF
+
       - name: Build signed release bundle (.aab)
         env:
-          KS_PASS: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_KS_FILE: ${{ runner.temp }}/play-upload.jks
+          PLAY_KS_PASS: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          PLAY_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_KEY_PASS: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_VERSION_CODE: ${{ github.run_number }}
         working-directory: android-app/android
         run: |
-          ./gradlew bundleRelease \
-            -Pandroid.injected.version.code=${{ github.run_number }} \
-            -Pandroid.injected.version.name=1.0.${{ github.run_number }} \
-            -Pandroid.injected.signing.store.file=play-upload.jks \
-            -Pandroid.injected.signing.store.password="$KS_PASS" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASS"
+          set -o pipefail
+          ./gradlew bundleRelease --stacktrace 2>&1 | tee "$RUNNER_TEMP/gradle.log"
+
+      # If the build fails, surface Gradle's own explanation as an error annotation on the run
+      # summary, so it can be read without opening the full log.
+      - name: Report build error
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/gradle.log" ]; then
+            msg=$(grep -A 12 "What went wrong" "$RUNNER_TEMP/gradle.log" | head -40)
+            [ -z "$msg" ] && msg=$(tail -40 "$RUNNER_TEMP/gradle.log")
+            msg="${msg//'%'/'%25'}"; msg="${msg//$'\n'/'%0A'}"; msg="${msg//$'\r'/}"
+            echo "::error title=Gradle build failed::$msg"
+          fi
+
+      - name: Show bundle signature
+        run: |
+          f=$(ls android/app/build/outputs/bundle/release/*.aab | head -1)
+          sha1=$(keytool -printcert -jarfile "$f" | grep -m1 'SHA1:' | sed 's/.*SHA1: *//')
+          echo "::notice title=Bundle built::$(basename "$f") versionCode ${{ github.run_number }}, signed by upload key SHA-1 $sha1"
 
       - name: Remove keystore from runner
         if: always()
-        run: rm -f android/app/play-upload.jks
+        run: rm -f "$RUNNER_TEMP/play-upload.jks"
 
       # Private build artifact only (download from this run's Summary page), never a public release.
       - name: Upload .aab
