@@ -1,5 +1,6 @@
 package net.airplot.blackbox;
 
+import android.app.AlarmManager;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -43,14 +44,21 @@ public class TrackerNotificationPlugin extends Plugin {
     private static final String CHANNEL_ID = "airplot_quick_controls";
     private static final int NOTIF_ID = 4242;
     private static final String ACTION_TOGGLE = "net.airplot.blackbox.ACTION_TOGGLE_RECORD";
-    private static final String ACTION_SNOOZE = "net.airplot.blackbox.ACTION_SNOOZE_OVERDUE";
+    static final String ACTION_SNOOZE = "net.airplot.blackbox.ACTION_SNOOZE_OVERDUE";
     private static final String ACTION_CLOSE = "net.airplot.blackbox.ACTION_CLOSE_APP";
     // Service started by @capacitor-community/background-geolocation - stopped on Close so
     // the location notification goes away with the app.
     private static final String GEO_SERVICE_CLASS = "com.equimaps.capacitor_background_geolocation.BackgroundGeolocationService";
 
-    private static final String ALERT_CHANNEL_ID = "airplot_alerts";
-    private static final int ALERT_NOTIF_ID = 4243;
+    static final String ALERT_CHANNEL_ID = "airplot_alerts";
+    static final int ALERT_NOTIF_ID = 4243;
+
+    // Overdue alarms (OverdueAlarmReceiver): request codes for the two PendingIntents, and the
+    // times last scheduled, so update() (called every few seconds) only reschedules on a change.
+    private static final int REQ_OVERDUE_DUE = 10;
+    private static final int REQ_OVERDUE_REMINDER = 11;
+    private long scheduledOverdueAtMs = -1;
+    private long scheduledReminderMs = -1;
 
     private static final int COLOR_IDLE_TITLE = Color.parseColor("#2E7D32");
     private static final int COLOR_IDLE_TEXT = Color.parseColor("#388E3C");
@@ -113,6 +121,12 @@ public class TrackerNotificationPlugin extends Plugin {
     // Separate HIGH-importance channel so alert() actually pops up with sound - the quick
     // controls channel above is deliberately LOW/silent and would never do that.
     private void createAlertChannel() {
+        ensureAlertChannel(getContext());
+    }
+
+    // Static so OverdueAlarmReceiver can make sure the channel exists even if the plugin
+    // hasn't loaded in this process yet.
+    static void ensureAlertChannel(Context ctx) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                 ALERT_CHANNEL_ID, "Flight Alerts", NotificationManager.IMPORTANCE_HIGH
@@ -120,8 +134,72 @@ public class TrackerNotificationPlugin extends Plugin {
             channel.setDescription("Overdue / Mayday alerts - sound and vibration.");
             channel.enableVibration(true);
             channel.setVibrationPattern(new long[]{0, 300, 150, 300, 150, 300, 150, 600});
-            NotificationManager nm = getContext().getSystemService(NotificationManager.class);
+            NotificationManager nm = ctx.getSystemService(NotificationManager.class);
             nm.createNotificationChannel(channel);
+        }
+    }
+
+    // The heads-up alert notification itself - used by alert() and by OverdueAlarmReceiver.
+    static void postAlertNotification(Context ctx, String title, String text, boolean showSnooze) {
+        ensureAlertChannel(ctx);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        Intent openAppIntent = ctx.getPackageManager().getLaunchIntentForPackage(ctx.getPackageName());
+        PendingIntent contentPending = PendingIntent.getActivity(ctx, 2, openAppIntent, flags);
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(ctx, ALERT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: swap for the app's own small icon once one exists
+            .setContentTitle(title)
+            .setContentText(text)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(contentPending);
+        if (showSnooze) {
+            Intent snoozeIntent = new Intent(ACTION_SNOOZE).setPackage(ctx.getPackageName());
+            PendingIntent snoozePending = PendingIntent.getBroadcast(ctx, 3, snoozeIntent, flags);
+            builder.addAction(0, "Snooze +15 min", snoozePending);
+        }
+        NotificationManagerCompat.from(ctx).notify(ALERT_NOTIF_ID, builder.build());
+    }
+
+    // Android alarms for the overdue reminder and the overdue time itself. They fire even
+    // while the WebView is asleep (screen off, app in the background) - blackbox.html's own
+    // 1-second timer is paused by Android then, so on its own the alert only appeared once
+    // the app was opened again. atMs <= 0 (not recording / no overdue time) cancels both.
+    private void scheduleOverdueAlarms(long atMs, long reminderMs) {
+        if (atMs == scheduledOverdueAtMs && reminderMs == scheduledReminderMs) return;
+        scheduledOverdueAtMs = atMs;
+        scheduledReminderMs = reminderMs;
+        Context ctx = getContext();
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        PendingIntent due = overdueAlarmIntent(ctx, REQ_OVERDUE_DUE, true);
+        PendingIntent reminder = overdueAlarmIntent(ctx, REQ_OVERDUE_REMINDER, false);
+        am.cancel(due);
+        am.cancel(reminder);
+        if (atMs <= 0) return;
+        long now = System.currentTimeMillis();
+        if (atMs > now) setWakeAlarm(am, atMs, due);
+        long reminderAt = atMs - reminderMs;
+        if (reminderMs > 0 && reminderAt > now) setWakeAlarm(am, reminderAt, reminder);
+    }
+
+    private static PendingIntent overdueAlarmIntent(Context ctx, int requestCode, boolean due) {
+        Intent i = new Intent(ctx, OverdueAlarmReceiver.class)
+            .setAction(due ? OverdueAlarmReceiver.ACTION_DUE : OverdueAlarmReceiver.ACTION_REMINDER);
+        return PendingIntent.getBroadcast(ctx, requestCode, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    // Exact (to the second) when Android allows exact alarms for the app; otherwise a normal
+    // alarm, which Android may hold back by a few minutes while the phone is idle.
+    private static void setWakeAlarm(AlarmManager am, long atMs, PendingIntent pi) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
+            } else {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
+            }
+        } catch (SecurityException e) {
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMs, pi);
         }
     }
 
@@ -140,7 +218,14 @@ public class TrackerNotificationPlugin extends Plugin {
         String heading = call.getString("heading", "-");
         String overdue = call.getString("overdue", "");
         Boolean recording = call.getBoolean("recording", false);
-        render(speed, altitude, lastTransmit, recording != null && recording, mode, heading, overdue);
+        boolean isRecording = recording != null && recording;
+        render(speed, altitude, lastTransmit, isRecording, mode, heading, overdue);
+        Double overdueAt = call.getDouble("overdueAtMs", 0.0);
+        Double reminder = call.getDouble("reminderMs", 0.0);
+        try {
+            scheduleOverdueAlarms(isRecording && overdueAt != null ? overdueAt.longValue() : 0L,
+                                  reminder != null ? reminder.longValue() : 0L);
+        } catch (Exception e) { /* best-effort - the in-app alert still works while the app is open */ }
         call.resolve();
     }
 
@@ -213,23 +298,7 @@ public class TrackerNotificationPlugin extends Plugin {
         }
 
         try {
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
-            Intent openAppIntent = getContext().getPackageManager().getLaunchIntentForPackage(getContext().getPackageName());
-            PendingIntent contentPending = PendingIntent.getActivity(getContext(), 2, openAppIntent, flags);
-            NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), ALERT_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: swap for the app's own small icon once one exists
-                .setContentTitle(title)
-                .setContentText(text)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setAutoCancel(true)
-                .setContentIntent(contentPending);
-            if (showSnooze) {
-                Intent snoozeIntent = new Intent(ACTION_SNOOZE).setPackage(getContext().getPackageName());
-                PendingIntent snoozePending = PendingIntent.getBroadcast(getContext(), 3, snoozeIntent, flags);
-                builder.addAction(0, "Snooze +15 min", snoozePending);
-            }
-            NotificationManagerCompat.from(getContext()).notify(ALERT_NOTIF_ID, builder.build());
+            postAlertNotification(getContext(), title, text, showSnooze);
         } catch (Exception e) {
             // Best-effort - vibration above still fires even if the notification post fails.
         }
