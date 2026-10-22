@@ -18,6 +18,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(TrackerNotificationPlugin.class);
         registerPlugin(DiagnosticsPlugin.class);
         registerPlugin(NotifyCentrePlugin.class);
+        registerPlugin(ExternalLinkPlugin.class);
         super.onCreate(savedInstanceState);
         // Android 13+ (API 33) requires POST_NOTIFICATIONS to be granted at runtime -
         // the manifest <uses-permission> alone does nothing. Without this request,
