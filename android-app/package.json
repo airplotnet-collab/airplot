@@ -12,10 +12,11 @@
   "dependencies": {
     "@capacitor-community/background-geolocation": "^1.2.26",
     "@capacitor/android": "^8.5.1",
+    "@capacitor/browser": "^8.0.5",
     "@capacitor/cli": "^8.5.1",
     "@capacitor/core": "^8.5.1",
-    "@capawesome/capacitor-google-sign-in": "^0.1.0",
     "@capawesome-team/capacitor-android-battery-optimization": "^8.0.0",
+    "@capawesome/capacitor-google-sign-in": "^0.1.0",
     "@capawesome/capacitor-settings-launcher": "^0.1.0"
   }
 }
