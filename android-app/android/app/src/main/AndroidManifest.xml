@@ -31,6 +31,27 @@
              while the app's page is asleep in the background. -->
         <receiver android:name=".OverdueAlarmReceiver" android:exported="false" />
 
+        <!-- Notification centre (admins / event managers): watches the server for Mayday,
+             Pan-Pan, overdue and trip start/end and pops up a notification, screen off too.
+             specialUse: no other foreground-service type fits a "watch for alerts" service. -->
+        <service
+            android:name=".NotifyCentreService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Safety monitoring: alerts admins and event managers when a tracked trip declares Mayday or Pan-Pan, becomes overdue, or starts or ends." />
+        </service>
+        <!-- Shortcut buttons on those notifications (snooze / turn off). -->
+        <receiver android:name=".NotifyActionReceiver" android:exported="false" />
+        <!-- Turns the notification centre back on after a restart or app update. -->
+        <receiver android:name=".NotifyBootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -62,4 +83,9 @@
     <!-- Overdue alarm on time to the second. Without it (Android 14+ doesn't grant it by
          default) the alarm still fires, but Android may delay it a few minutes while idle. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Notification centre: its own foreground-service type, keeping the CPU awake between
+         checks and lighting the screen for an alert, and restarting after the phone restarts. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 </manifest>
