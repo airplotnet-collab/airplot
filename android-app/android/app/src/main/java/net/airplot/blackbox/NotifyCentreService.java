@@ -10,7 +10,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
-import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
@@ -44,9 +43,16 @@ public class NotifyCentreService extends Service {
     static final String ACTION_CHECK_NOW = "net.airplot.blackbox.NOTIFY_CHECK_NOW";
     static final int SERVICE_NOTIF_ID = 4250;
     static final String CH_SERVICE = "airplot_watch_service";
-    static final String CH_DISTRESS = "airplot_watch_distress";
-    static final String CH_OVERDUE = "airplot_watch_overdue";
-    static final String CH_TRIPS = "airplot_watch_trips";
+    // One channel per kind, each with its own sound (res/raw/watch_*.wav). Android fixes a
+    // channel's sound when it is first made, so these have new ids ("2"); the first-version
+    // channels (alarm-clock ringtone) are deleted in ensureChannels().
+    static final String CH_MAYDAY = "airplot_watch2_mayday";
+    static final String CH_PANPAN = "airplot_watch2_panpan";
+    static final String CH_CANCEL = "airplot_watch2_cancel";
+    static final String CH_OVERDUE = "airplot_watch2_overdue";
+    static final String CH_START = "airplot_watch2_start";
+    static final String CH_END = "airplot_watch2_end";
+    private static final String[] OLD_CHANNELS = {"airplot_watch_distress", "airplot_watch_overdue", "airplot_watch_trips"};
 
     private volatile boolean running = false;
     private Thread worker;
@@ -204,33 +210,36 @@ public class NotifyCentreService extends Service {
         svc.setShowBadge(false);
         nm.createNotificationChannel(svc);
 
-        AudioAttributes alarmAttrs = new AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ALARM)
+        for (String old : OLD_CHANNELS) { try { nm.deleteNotificationChannel(old); } catch (Exception e) { /* already gone */ } }
+        // Mayday / Pan-Pan play on the ALARM volume (heard even with notification sounds turned
+        // down) and through Do Not Disturb; the rest on the normal notification volume.
+        makeChannel(ctx, nm, CH_MAYDAY, "Watch: Mayday", "Mayday from a trip you watch - fast warning tone.",
+            R.raw.watch_mayday, true, new long[]{0, 400, 150, 400, 150, 400, 150, 800});
+        makeChannel(ctx, nm, CH_PANPAN, "Watch: Pan-Pan", "Pan-Pan from a trip you watch - double caution chime.",
+            R.raw.watch_panpan, true, new long[]{0, 300, 200, 300});
+        makeChannel(ctx, nm, CH_CANCEL, "Watch: Mayday / Pan-Pan cancelled", "The pilot cancelled their Mayday or Pan-Pan - calm rising chime.",
+            R.raw.watch_cancel, false, new long[]{0, 150, 100, 150});
+        makeChannel(ctx, nm, CH_OVERDUE, "Watch: Overdue", "A trip you watch passed its overdue time - three falling chimes.",
+            R.raw.watch_overdue, false, new long[]{0, 300, 150, 300, 150, 600});
+        makeChannel(ctx, nm, CH_START, "Watch: Recording started", "Someone you watch started recording - soft rising chime.",
+            R.raw.watch_start, false, new long[]{0, 120});
+        makeChannel(ctx, nm, CH_END, "Watch: Recording ended", "Someone you watch ended recording - soft falling chime.",
+            R.raw.watch_end, false, new long[]{0, 120});
+    }
+
+    private static void makeChannel(Context ctx, NotificationManager nm, String id, String name, String desc,
+                                    int soundRes, boolean urgent, long[] vibration) {
+        NotificationChannel ch = new NotificationChannel(id, name, NotificationManager.IMPORTANCE_HIGH);
+        ch.setDescription(desc);
+        ch.enableVibration(true);
+        ch.setVibrationPattern(vibration);
+        AudioAttributes attrs = new AudioAttributes.Builder()
+            .setUsage(urgent ? AudioAttributes.USAGE_ALARM : AudioAttributes.USAGE_NOTIFICATION_EVENT)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build();
-        Uri alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
-        if (alarmSound == null) alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-
-        NotificationChannel distress = new NotificationChannel(CH_DISTRESS, "Watch: Mayday / Pan-Pan", NotificationManager.IMPORTANCE_HIGH);
-        distress.setDescription("Mayday and Pan-Pan from the trips you watch (and their cancels).");
-        distress.enableVibration(true);
-        distress.setVibrationPattern(new long[]{0, 400, 200, 400, 200, 400, 200, 800});
-        distress.setSound(alarmSound, alarmAttrs);
-        distress.setBypassDnd(true);
-        distress.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        nm.createNotificationChannel(distress);
-
-        NotificationChannel overdue = new NotificationChannel(CH_OVERDUE, "Watch: Overdue", NotificationManager.IMPORTANCE_HIGH);
-        overdue.setDescription("A watched trip passed its overdue time.");
-        overdue.enableVibration(true);
-        overdue.setVibrationPattern(new long[]{0, 300, 150, 300, 150, 600});
-        overdue.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        nm.createNotificationChannel(overdue);
-
-        NotificationChannel trips = new NotificationChannel(CH_TRIPS, "Watch: Trip started / ended", NotificationManager.IMPORTANCE_HIGH);
-        trips.setDescription("Someone you watch started or ended recording.");
-        trips.enableVibration(true);
-        trips.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        nm.createNotificationChannel(trips);
+        ch.setSound(Uri.parse("android.resource://" + ctx.getPackageName() + "/" + soundRes), attrs);
+        if (urgent) ch.setBypassDnd(true);
+        ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        nm.createNotificationChannel(ch);
     }
 
     // ---- the always-on "watching" notification ----
@@ -279,14 +288,14 @@ public class NotifyCentreService extends Service {
         String what;
         String channel;
         switch (type) {
-            case "mayday": what = "MAYDAY"; channel = CH_DISTRESS; break;
-            case "mayday_cancel": what = "Mayday cancelled"; channel = CH_DISTRESS; break;
-            case "panpan": what = "PAN PAN"; channel = CH_DISTRESS; break;
-            case "panpan_cancel": what = "Pan-Pan cancelled"; channel = CH_DISTRESS; break;
+            case "mayday": what = "MAYDAY"; channel = CH_MAYDAY; break;
+            case "mayday_cancel": what = "Mayday cancelled"; channel = CH_CANCEL; break;
+            case "panpan": what = "PAN PAN"; channel = CH_PANPAN; break;
+            case "panpan_cancel": what = "Pan-Pan cancelled"; channel = CH_CANCEL; break;
             case "overdue": what = "OVERDUE"; channel = CH_OVERDUE; break;
-            case "start": what = "Started"; channel = CH_TRIPS; break;
-            case "end": what = "Ended"; channel = CH_TRIPS; break;
-            default: what = type; channel = CH_TRIPS; break;
+            case "start": what = "Started"; channel = CH_START; break;
+            case "end": what = "Ended"; channel = CH_END; break;
+            default: what = type; channel = CH_START; break;
         }
         boolean urgent = "mayday".equals(type) || "panpan".equals(type) || "overdue".equals(type);
         String title = (isTest ? "TEST - " : "") + what + " - " + reg;
