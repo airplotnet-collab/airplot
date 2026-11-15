@@ -1,0 +1,80 @@
+name: Build TAF Map APK
+
+# TAF Map (tafmap-app/): a thin Android shell around https://airplot.net/wxmap.html.
+# Only needed when something under tafmap-app/ changes - editing wxmap.html on GoDaddy does NOT need a
+# rebuild, the app loads the live page. Builds an installable debug APK for testing:
+#   - a build artifact on the run's Summary page, and
+#   - the GitHub Release "tafmap-latest" (NOT "latest" - that one is Blackbox's sideload APK):
+#     https://github.com/<owner>/<repo>/releases/download/tafmap-latest/TAF-Map-debug.apk
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tafmap-app/**'
+      - '.github/workflows/build-tafmap-android.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tafmap-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build debug APK
+        working-directory: tafmap-app/android
+        run: ./gradlew assembleDebug
+
+      - name: Show debug signature (for Google Cloud's Android OAuth client)
+        run: |
+          f=android/app/build/outputs/apk/debug/TAF-Map-debug.apk
+          sha1=$(keytool -printcert -jarfile "$f" | grep -m1 'SHA1:' | sed 's/.*SHA1: *//')
+          echo "::notice title=TAF Map debug APK::package net.airplot.tafmap, signed with SHA-1 $sha1"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tafmap-debug-apk
+          path: tafmap-app/android/app/build/outputs/apk/debug/TAF-Map-debug.apk
+          retention-days: 30
+
+      - name: Publish debug APK to the tafmap-latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tafmap-latest
+          name: TAF Map - latest build
+          make_latest: false
+          prerelease: true
+          files: tafmap-app/android/app/build/outputs/apk/debug/TAF-Map-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

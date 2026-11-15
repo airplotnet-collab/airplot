@@ -1,0 +1,13 @@
+{
+  "name": "tafmap-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TAF Map - Android shell (Capacitor) around https://airplot.net/wxmap.html",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
+    "@capawesome/capacitor-google-sign-in": "^0.1.0"
+  }
+}

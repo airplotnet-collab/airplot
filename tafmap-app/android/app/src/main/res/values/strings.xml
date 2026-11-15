@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TAF Map</string>
+    <string name="title_activity_main">TAF Map</string>
+    <string name="package_name">net.airplot.tafmap</string>
+    <string name="custom_url_scheme">net.airplot.tafmap</string>
+</resources>
