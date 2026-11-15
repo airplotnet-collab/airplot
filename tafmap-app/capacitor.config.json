@@ -1,0 +1,15 @@
+{
+  "appId": "net.airplot.tafmap",
+  "appName": "TAF Map",
+  "webDir": "www",
+  "server": {
+    "url": "https://airplot.net/wxmap.html",
+    "allowNavigation": [
+      "airplot.net",
+      "*.airplot.net"
+    ]
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
