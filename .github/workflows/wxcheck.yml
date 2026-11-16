@@ -1,0 +1,17 @@
+name: Check one spot (one-off)
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [vis-check]
+    paths: ['wxtiles/check_point.py', '.github/workflows/wxcheck.yml']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy requests eccodes eccodeslib && python wxtiles/check_point.py 49.195 -123.184
