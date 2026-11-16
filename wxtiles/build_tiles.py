@@ -30,11 +30,32 @@ import requests
 
 STEPS = list(range(0, 121, 3))           # 0 - 120 h every 3 h
 NS = len(STEPS)
-RES = 0.25
-NLAT, NLON = 721, 1440                   # 90 .. -90, -180 .. 179.75
+# (2026-11-15) WX_RES=0p1: the 9 km (0.1 deg) ECMWF data, cut only for the REGIONS below (the world stays 0.25 deg).
+RESOL = os.environ.get("WX_RES", "0p25")
+NINE = RESOL == "0p1"
+RES = 0.1 if NINE else 0.25
+NLAT, NLON = int(round(180 / RES)) + 1, int(round(360 / RES))   # 90 .. -90, -180 .. (180 - RES)
 TILE = 10                                # degrees
-TP = int(TILE / RES) + 1                 # 41 points per side
+TP = int(round(TILE / RES)) + 1          # 41 points per side (0.25), 101 (0.1)
 OUT = os.environ.get("WX_OUT", "site/wx")
+# 9 km regions, as 10 x 10 degree tiles (south-west corners): lat0 / lon0 ranges, ends included
+REGIONS = {
+    "North America": (range(20, 80, 10), range(-170, -50, 10)),   # 20-80N, 170-50W
+    "Europe":        (range(30, 80, 10), range(-30, 50, 10)),     # 30-80N, 30W-50E
+    "East Asia":     (range(20, 50, 10), range(110, 150, 10)),    # 20-50N, 110-150E: Hong Kong, Taiwan, Japan
+    "Australia":     (range(-50, -10, 10), range(110, 160, 10)),  # 50-10S, 110-160E
+}
+TILES9 = sorted({(la, lo) for las, los in REGIONS.values() for la in las for lo in los}) if NINE else None
+if NINE:
+    _rows = [np.clip(np.arange(int(round((90 - (la + TILE)) / RES)), int(round((90 - (la + TILE)) / RES)) + TP), 0, NLAT - 1) for la, lo in TILES9]
+    _cols = [(np.arange(int(round((lo + 180) / RES)), int(round((lo + 180) / RES)) + TP)) % NLON for la, lo in TILES9]
+    GRID = (len(TILES9), TP, TP)
+else:
+    GRID = (NLAT, NLON)
+def cut(g):
+    """a whole-globe field on our grid -> what we keep (9 km: the region tiles only)."""
+    if not NINE: return g
+    return np.stack([g[np.ix_(r, c)] for r, c in zip(_rows, _cols)]).astype(np.float32)
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
@@ -73,22 +94,26 @@ MISSING = {"i1": -128, "u1": 255, "i2": -32768}
 LIMITS = {"i1": (-127, 127), "u1": (0, 254), "i2": (-32767, 32767)}
 MS2KT = 1.943844
 
-data = {name: np.full((NS, NLAT, NLON), np.nan, dtype=np.float32) for name, *_ in VARS}
-elev = np.zeros((NLAT, NLON), dtype=np.float32)       # model ground height, m (GFS)
+data = {name: np.full((NS,) + GRID, np.nan, dtype=np.float32) for name, *_ in VARS}
+elev = np.zeros(GRID, dtype=np.float32)       # model ground height, m (GFS)
 have_elev = False
 
-def to_grid(values, ni, nj, lat0, lon0, dj_pos):
-    """GRIB values -> our grid (lat 90..-90, lon -180..179.75)."""
+def to_grid(values, ni, nj, lat0, lon0, dj_pos, res=None):
+    """GRIB values -> a grid of lat 90..-90, lon -180..(180 - res)."""
+    res = res or RES
     a = np.asarray(values, dtype=np.float32).reshape(nj, ni)
     if dj_pos:            # south -> north: flip
         a = a[::-1]
     lon0 = ((lon0 + 180.0) % 360.0) - 180.0
-    shift = int(round((lon0 + 180.0) / RES))
+    shift = int(round((lon0 + 180.0) / res))
     if shift:
         a = np.roll(a, shift, axis=1)
     return a
 
-def read_grib(path, handle):
+def read_grib(path, handle, res=None):
+    """every field of a GRIB file on a regular res-degree global grid -> handle(gid, grid)."""
+    res = res or RES
+    nlat, nlon = int(round(180 / res)) + 1, int(round(360 / res))
     import eccodes
     n = 0
     with open(path, "rb") as f:
@@ -98,14 +123,14 @@ def read_grib(path, handle):
                 break
             try:
                 ni = eccodes.codes_get(gid, "Ni"); nj = eccodes.codes_get(gid, "Nj")
-                if ni != NLON or nj != NLAT:
+                if ni != nlon or nj != nlat:
                     continue
                 lat0 = eccodes.codes_get(gid, "latitudeOfFirstGridPointInDegrees")
                 lon0 = eccodes.codes_get(gid, "longitudeOfFirstGridPointInDegrees")
                 dj_pos = eccodes.codes_get(gid, "jScansPositively") == 1
                 vals = eccodes.codes_get_values(gid)
                 miss = eccodes.codes_get(gid, "missingValue") if eccodes.codes_is_defined(gid, "missingValue") else None
-                grid = to_grid(vals, ni, nj, lat0, lon0, dj_pos)
+                grid = to_grid(vals, ni, nj, lat0, lon0, dj_pos, res)
                 if miss is not None:
                     grid[grid == miss] = np.nan
                 handle(gid, grid)
@@ -140,7 +165,7 @@ def http_get(path, rng=None, tries=8):
     raise RuntimeError(last or "download failed")
 
 def ec_path(run, stream, step, ext):
-    return "%s/%02dz/ifs/0p25/%s/%s%02d0000-%dh-%s-fc.%s" % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, ext)
+    return ("%s/%02dz/ifs/" + RESOL + "/%s/%s%02d0000-%dh-%s-fc.%s") % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, ext)
 
 def ecmwf():
     # newest run whose last step is out (00/12Z: stream "oper"; 06/18Z: "scda" or "oper")
@@ -213,7 +238,7 @@ def ecmwf():
         elif sn == "r" and lev in (850, 700): data["r%d" % lev][k] = g
     t0 = time.time(); nf = 0
     for f in files:
-        nf += read_grib(f, handle); os.remove(f)
+        nf += read_grib(f, lambda gid, g: handle(gid, cut(g))); os.remove(f)
     log("decoded", nf, "fields in", round(time.time() - t0), "s")
     for sn, byk in acc.items():
         prev = None
@@ -237,6 +262,23 @@ def ecmwf():
     return run, got
 
 # ── GFS visibility + ground height (NOAA, public domain) ──
+_gfs_w = None
+def gfs_to_ours(g):
+    """a 0.25 deg global field (721 x 1440) -> our grid / region tiles."""
+    global _gfs_w
+    if not NINE: return g
+    if _gfs_w is None:  # where each tile point falls in the 0.25 grid (once)
+        lat = np.stack([90 - r * RES for r in _rows]); lon = np.stack([((c * RES) % 360) - 180 for c in _cols])
+        fy = np.clip((90 - lat) / 0.25, 0, 719.9999); fx = ((lon + 180) / 0.25) % 1440
+        y0 = np.floor(fy).astype(int); x0 = np.floor(fx).astype(int); wy = (fy - y0)[:, :, None]; wx = (fx - x0)[:, None, :]
+        _gfs_w = (y0, x0, (x0 + 1) % 1440, wy, wx)
+    y0, x0, x1, wy, wx = _gfs_w
+    out = []
+    for t in range(len(TILES9)):
+        r0, r1 = y0[t][:, None], (y0[t] + 1)[:, None]; c0, c1 = x0[t][None, :], x1[t][None, :]
+        a = g[r0, c0] * (1 - wy[t]) * (1 - wx[t]) + g[r0, c1] * (1 - wy[t]) * wx[t] + g[r1, c0] * wy[t] * (1 - wx[t]) + g[r1, c1] * wy[t] * wx[t]
+        out.append(a)
+    return np.stack(out).astype(np.float32)
 GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 def gfs(run_ec):
     global have_elev
@@ -267,10 +309,11 @@ def gfs(run_ec):
                 r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
                 if r.status_code in (200, 206): out[key] = r.content
         return out
-    def decode(raw):
+    def decode(raw):  # GFS is 0.25 deg: onto our grid (9 km: bilinear to the region tiles' points)
         fn = "gfs_tmp.grib2"; open(fn, "wb").write(raw); res = {}
-        read_grib(fn, lambda gid, g: res.setdefault("g", g)); os.remove(fn)
-        return res.get("g")
+        read_grib(fn, lambda gid, g: res.setdefault("g", g), 0.25); os.remove(fn)
+        g = res.get("g")
+        return None if g is None else gfs_to_ours(g)
     def fetch(fh, pats):
         return {k: g for k, g in ((k, decode(b)) for k, b in fetch_raw(fh, pats).items()) if g is not None}
     f0 = fetch(0, ["HGT:surface"])
@@ -314,7 +357,18 @@ def write_tiles(run, gfs_cycle):
     packed = {name: pack(name, dt_, sc, off, tr, data[name]) for name, dt_, sc, off, tr in VARS}
     elev_p = np.clip(np.round(elev), -500, 9000).astype("<i2")
     n = 0; total = 0
-    for lat0 in range(-90, 90, TILE):
+    if NINE:
+        for t, (lat0, lon0) in enumerate(TILES9):
+            buf = bytearray()
+            for name, *_ in VARS:
+                buf += np.ascontiguousarray(packed[name][:, t]).tobytes()
+            buf += np.ascontiguousarray(elev_p[t]).tobytes()
+            hdr = json.dumps({"lat0": lat0, "lon0": lon0, "n": TP, "res": RES}).encode()
+            blob = gzip.compress(struct.pack("<4sI", b"APWX", len(hdr)) + hdr + bytes(buf), 6)
+            with open(f"{OUT}/t/{lat0}_{lon0}.bin", "wb") as f:
+                f.write(blob)
+            n += 1; total += len(blob)
+    for lat0 in ([] if NINE else range(-90, 90, TILE)):
         r_top = int(round((90 - (lat0 + TILE)) / RES))
         rows = np.clip(np.arange(r_top, r_top + TP), 0, NLAT - 1)
         for lon0 in range(-180, 180, TILE):
@@ -330,7 +384,8 @@ def write_tiles(run, gfs_cycle):
                 f.write(blob)
             n += 1; total += len(blob)
     meta = {
-        "source": "ECMWF IFS open data 0.25 deg (CC BY 4.0) - visibility: NOAA GFS 0.25 deg",
+        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility: NOAA GFS 0.25 deg",
+        "resol": RESOL, "tiles": ["%d_%d" % t for t in TILES9] if NINE else None, "regions": {k: [[min(a), max(a) + TILE], [min(b), max(b) + TILE]] for k, (a, b) in REGIONS.items()} if NINE else None,
         "attribution": "Contains ECMWF data, CC BY 4.0. Visibility: NOAA GFS.",
         "run": run.strftime("%Y-%m-%dT%H:%MZ"), "gfs": gfs_cycle.strftime("%Y-%m-%dT%H:%MZ") if gfs_cycle else None,
         "made": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
@@ -349,6 +404,6 @@ if __name__ == "__main__":
     except Exception as e:
         log("GFS failed (no visibility this run):", e); c = None
     for name, *_ in VARS:
-        miss = int(np.isnan(data[name]).all(axis=(1, 2)).sum())
+        miss = int(np.isnan(data[name]).all(axis=tuple(range(1, data[name].ndim))).sum())
         log(f"{name:5s} missing steps: {miss}/{NS}")
     write_tiles(run, c)

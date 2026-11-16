@@ -1,0 +1,58 @@
+name: Model data tiles 9 km (ECMWF 0.1 deg, regions)
+
+# (2026-11-15) The 9 km ECMWF open data (0.1 deg, CC BY 4.0) for North America, Europe, East Asia (Hong Kong,
+# Taiwan, Japan) and Australia - wxtiles/build_tiles.py with WX_RES=0p1 - on Cloudflare R2:
+#   https://wx.airplot.net/wx9/meta.json , /wx9/t/<lat0>_<lon0>.bin
+# The 9 km set comes out ~2 h after the 0.25 deg one, so this runs 2 h after wxtiles.yml. The chart (wxmap.html)
+# uses 9 km where it has a tile and it is the same run (or newer) as the world one.
+on:
+  schedule:
+    - cron: '20 4,10,16,22 * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [r2-9km]               # test builds on the work branch (built, not uploaded)
+    paths: ['wxtiles/build_tiles.py', '.github/workflows/wxtiles9.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wxtiles9
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy requests boto3 eccodes eccodeslib
+
+      - name: Build 9 km tiles
+        working-directory: wxtiles
+        env:
+          WX_RES: '0p1'
+          WX_OUT: ${{ github.workspace }}/site/wx9
+        run: python build_tiles.py
+
+      - name: Size
+        run: |
+          free -g; du -sh site/wx9; ls site/wx9/t | wc -l
+          echo "::notice title=Tiles 9 km::$(du -sh site/wx9 | cut -f1) in $(ls site/wx9/t | wc -l) tiles, run $(python -c "import json;print(json.load(open('site/wx9/meta.json'))['run'])")"
+
+      - name: Upload to Cloudflare R2 (wx.airplot.net/wx9)
+        if: github.ref == 'refs/heads/main'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python wxtiles/upload_r2.py site/wx9 wx9
