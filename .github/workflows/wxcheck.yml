@@ -3,7 +3,7 @@ on:
   workflow_dispatch: {}
   push:
     branches: [vis-check]
-    paths: ['wxtiles/check_point.py', '.github/workflows/wxcheck.yml']
+    paths: ['wxtiles/check_vis.py', 'wxtiles/vis_rules.py', '.github/workflows/wxcheck.yml']
 permissions:
   contents: read
 jobs:
@@ -14,4 +14,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install numpy requests eccodes eccodeslib && python wxtiles/check_point.py 49.195 -123.184
+      - run: pip install numpy requests eccodes eccodeslib && cd wxtiles && python check_vis.py
