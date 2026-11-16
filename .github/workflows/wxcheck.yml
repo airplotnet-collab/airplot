@@ -2,8 +2,8 @@ name: Check one spot (one-off)
 on:
   workflow_dispatch: {}
   push:
-    branches: [vis-check, vis-rh]
-    paths: ['wxtiles/check_vis.py', 'wxtiles/vis_rules.py', '.github/workflows/wxcheck.yml']
+    branches: [vis-check, vis-rh, gust-check]
+    paths: ['wxtiles/check_gust.py', 'wxtiles/check_vis.py', 'wxtiles/vis_rules.py', '.github/workflows/wxcheck.yml']
 permissions:
   contents: read
 jobs:
@@ -14,4 +14,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install numpy requests eccodes eccodeslib && cd wxtiles && python check_vis.py
+      - run: pip install numpy requests eccodes eccodeslib && cd wxtiles && python check_gust.py
