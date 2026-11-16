@@ -121,25 +121,39 @@ def ecmwf():
     run = client.latest(type="fc", step=120, param="2t")
     log("ECMWF run", run)
     sfc = ["2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"]
-    got = set()
-    for params, extra, target in [(sfc, {}, "ec_sfc.grib2"), (["t", "u", "v", "r", "gh"], {"levelist": [925, 850, 700, 500]}, "ec_pl.grib2")]:
-        ok = list(params)
+    pl = ["t", "u", "v", "r", "gh"]
+    date, hour = run.strftime("%Y%m%d"), run.hour
+    # which parameters this run has (one small request each; a missing one is left out, not fatal)
+    def probe(p, extra):
         try:
-            client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=STEPS, param=ok, target=target, **extra)
+            client.retrieve(date=date, time=hour, type="fc", step=[3], param=[p], target=f"probe_{p}.grib2", **extra)
+            os.remove(f"probe_{p}.grib2"); return True
         except Exception as e:
-            # a parameter this run does not have: find it (one small request each) and leave it out
-            log("retrieve failed:", str(e)[:300])
-            good = []
-            for p in params:
-                try:
-                    client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=[3], param=[p], target="probe.grib2", **extra)
-                    good.append(p)
-                except Exception as e2:
-                    log("  not available:", p, str(e2)[:120])
-            ok = good
-            client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=STEPS, param=ok, target=target, **extra)
-        log("downloaded", target, round(os.path.getsize(target) / 1e6), "MB")
-        got.update(ok)
+            log("  not available:", p, str(e)[:120]); return False
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as ex:
+        sfc_ok = [p for p, ok in zip(sfc, ex.map(lambda p: probe(p, {}), sfc)) if ok]
+        pl_ok = [p for p, ok in zip(pl, ex.map(lambda p: probe(p, {"levelist": [850]}), pl)) if ok]
+    log("parameters:", sfc_ok, pl_ok)
+    # (2026-11-15) the downloads in parallel: one request per step and level type, 10 at a time (one by one
+    # took most of the run waiting on the network)
+    jobs = [(s, "sfc", sfc_ok, {}) for s in STEPS] + [(s, "pl", pl_ok, {"levelist": [925, 850, 700, 500]}) for s in STEPS]
+    def get(job):
+        s, kind, params, extra = job
+        target = f"ec_{kind}_{s:03d}.grib2"
+        for attempt in range(3):
+            try:
+                Client(source=os.environ.get("ECMWF_SOURCE", "aws"), model="ifs", resol="0p25").retrieve(
+                    date=date, time=hour, type="fc", step=[s], param=params, target=target, **extra)
+                return target
+            except Exception as e:
+                log("  retry", target, str(e)[:100]); time.sleep(5 * (attempt + 1))
+        return None
+    t0 = time.time()
+    with ThreadPoolExecutor(10) as ex:
+        files = [f for f in ex.map(get, jobs) if f]
+    log("downloaded", len(files), "files,", round(sum(os.path.getsize(f) for f in files) / 1e6), "MB in", round(time.time() - t0), "s")
+    got = set(sfc_ok + pl_ok)
     import eccodes
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
     def handle(gid, g):
@@ -163,9 +177,10 @@ def ecmwf():
         elif sn == "gh" and lev in (850, 700): data["z%d" % lev][k] = g
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (850, 700): data["r%d" % lev][k] = g
-    for f in ("ec_sfc.grib2", "ec_pl.grib2"):
-        if os.path.exists(f):
-            log("decoded", f, read_grib(f, handle), "fields")
+    t0 = time.time(); nf = 0
+    for f in files:
+        nf += read_grib(f, handle); os.remove(f)
+    log("decoded", nf, "fields in", round(time.time() - t0), "s")
     for sn, byk in acc.items():
         prev = None
         for k in range(NS):
@@ -196,7 +211,7 @@ def gfs(run_ec):
         log("no GFS cycle found - no visibility"); return None
     log("GFS cycle", c)
     import eccodes
-    def fetch(fh, pats):
+    def fetch_raw(fh, pats):   # bytes of the wanted fields (network only - safe in threads)
         base = f"{GFS}/gfs.{c:%Y%m%d}/{c:%H}/atmos/gfs.t{c:%H}z.pgrb2.0p25.f{fh:03d}"
         idx = requests.get(base + ".idx", timeout=60)
         if idx.status_code != 200: return {}
@@ -204,27 +219,40 @@ def gfs(run_ec):
         for i, line in enumerate(lines):
             parts = line.split(":")
             key = parts[3] + ":" + parts[4]
-            for p in pats:
-                if key == p:
-                    start = int(parts[1]); end = int(lines[i + 1].split(":")[1]) - 1 if i + 1 < len(lines) else ""
-                    r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
-                    fn = f"gfs_{fh}_{len(out)}.grib2"; open(fn, "wb").write(r.content)
-                    res = {}
-                    read_grib(fn, lambda gid, g: res.setdefault("g", g))
-                    os.remove(fn)
-                    if "g" in res: out[p] = res["g"]
+            if key in pats:
+                start = int(parts[1]); end = int(lines[i + 1].split(":")[1]) - 1 if i + 1 < len(lines) else ""
+                r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
+                if r.status_code in (200, 206): out[key] = r.content
         return out
+    def decode(raw):
+        fn = "gfs_tmp.grib2"; open(fn, "wb").write(raw); res = {}
+        read_grib(fn, lambda gid, g: res.setdefault("g", g)); os.remove(fn)
+        return res.get("g")
+    def fetch(fh, pats):
+        return {k: g for k, g in ((k, decode(b)) for k, b in fetch_raw(fh, pats).items()) if g is not None}
     f0 = fetch(0, ["HGT:surface"])
     if "HGT:surface" in f0:
         elev[:] = f0["HGT:surface"]; have_elev = True
-    for k, s in enumerate(STEPS):
-        valid = run_ec + dt.timedelta(hours=s)
+    def one(k):
+        valid = run_ec + dt.timedelta(hours=STEPS[k])
         fh = int((valid - c).total_seconds() // 3600)
-        if fh < 0 or fh > 384: continue
+        if fh < 0 or fh > 384: return k, None
         fh -= fh % 3
-        v = fetch(fh, ["VIS:surface"])
-        if "VIS:surface" in v:
-            data["vis"][k] = v["VIS:surface"] / 1609.34
+        for attempt in range(3):
+            try:
+                return k, fetch_raw(fh, ["VIS:surface"]).get("VIS:surface")
+            except Exception as e:
+                log("  GFS retry", fh, e); time.sleep(5)
+        return k, None
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time()
+    with ThreadPoolExecutor(10) as ex:
+        raws = list(ex.map(one, range(NS)))
+    for k, raw in raws:
+        if raw:
+            g = decode(raw)
+            if g is not None: data["vis"][k] = g / 1609.34
+    log("GFS visibility in", round(time.time() - t0), "s")
     log("GFS visibility steps:", int(np.sum([~np.isnan(data["vis"][k]).all() for k in range(NS)])))
     return c
 
