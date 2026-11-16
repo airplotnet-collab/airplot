@@ -290,6 +290,7 @@ def gfs(run_ec):
     for back in range(0, 48, 6):
         c = (now - dt.timedelta(hours=back)).replace(minute=0, second=0, microsecond=0)
         c = c.replace(hour=c.hour - c.hour % 6)
+        if c > run_ec: continue  # (2026-11-15) a GFS run newer than the ECMWF one has no data for its first hours
         need = int((run_ec - c).total_seconds() // 3600) + STEPS[-1]
         need = min(384, max(0, need - need % 3))
         url = f"{GFS}/gfs.{c:%Y%m%d}/{c:%H}/atmos/gfs.t{c:%H}z.pgrb2.0p25.f{need:03d}.idx"
