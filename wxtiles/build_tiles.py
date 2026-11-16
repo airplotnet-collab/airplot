@@ -115,44 +115,78 @@ def read_grib(path, handle):
     return n
 
 # ── ECMWF ──
-def ecmwf():
-    from ecmwf.opendata import Client
-    client = Client(source=os.environ.get("ECMWF_SOURCE", "aws"), model="ifs", resol="0p25")
-    run = client.latest(type="fc", step=120, param="2t")
-    log("ECMWF run", run)
-    sfc = ["2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"]
-    pl = ["t", "u", "v", "r", "gh"]
-    date, hour = run.strftime("%Y%m%d"), run.hour
-    # which parameters this run has (one small request each; a missing one is left out, not fatal)
-    def probe(p, extra):
+# (2026-11-15) our own downloader: the ecmwf-opendata client waited 120 s after every "503 busy" from the
+# mirror and the job ran out of time. Here: read each step's .index, fetch only our fields (adjacent ones
+# merged into one request), short retries, and switch mirror (AWS -> ECMWF's own server) when one is busy.
+MIRRORS = [m for m in os.environ.get("ECMWF_MIRRORS", "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com,https://data.ecmwf.int/forecasts").split(",") if m]
+SESSION = requests.Session()
+SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16))
+
+def http_get(path, rng=None, tries=8):
+    """GET from the first mirror that answers; short backoff on 429/5xx."""
+    last = None
+    for attempt in range(tries):
+        m = MIRRORS[attempt % len(MIRRORS)]
         try:
-            client.retrieve(date=date, time=hour, type="fc", step=[3], param=[p], target=f"probe_{p}.grib2", **extra)
-            os.remove(f"probe_{p}.grib2"); return True
+            r = SESSION.get(m + "/" + path, headers={"Range": "bytes=%d-%d" % rng} if rng else None, timeout=120)
+            if r.status_code in (200, 206):
+                return r.content if rng else r.text
+            if r.status_code == 404:
+                return None
+            last = "HTTP %d from %s" % (r.status_code, m.split("/")[2])
         except Exception as e:
-            log("  not available:", p, str(e)[:120]); return False
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(8) as ex:
-        sfc_ok = [p for p, ok in zip(sfc, ex.map(lambda p: probe(p, {}), sfc)) if ok]
-        pl_ok = [p for p, ok in zip(pl, ex.map(lambda p: probe(p, {"levelist": [850]}), pl)) if ok]
-    log("parameters:", sfc_ok, pl_ok)
-    # (2026-11-15) the downloads in parallel: one request per step and level type, 10 at a time (one by one
-    # took most of the run waiting on the network)
-    jobs = [(s, "sfc", sfc_ok, {}) for s in STEPS] + [(s, "pl", pl_ok, {"levelist": [925, 850, 700, 500]}) for s in STEPS]
-    def get(job):
-        s, kind, params, extra = job
-        target = f"ec_{kind}_{s:03d}.grib2"
-        for attempt in range(3):
+            last = str(e)[:100]
+        time.sleep(min(30, 2 * (attempt + 1)))
+    raise RuntimeError(last or "download failed")
+
+def ec_path(run, stream, step, ext):
+    return "%s/%02dz/ifs/0p25/%s/%s%02d0000-%dh-%s-fc.%s" % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, ext)
+
+def ecmwf():
+    # newest run whose last step is out (00/12Z: stream "oper"; 06/18Z: "scda" or "oper")
+    now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    run = stream = None
+    for back in range(0, 48, 6):
+        c = now - dt.timedelta(hours=back); c = c.replace(hour=c.hour - c.hour % 6)
+        for st in ("oper", "scda"):
             try:
-                Client(source=os.environ.get("ECMWF_SOURCE", "aws"), model="ifs", resol="0p25").retrieve(
-                    date=date, time=hour, type="fc", step=[s], param=params, target=target, **extra)
-                return target
+                if http_get(ec_path(c, st, STEPS[-1], "index"), tries=2):
+                    run, stream = c, st; break
             except Exception as e:
-                log("  retry", target, str(e)[:100]); time.sleep(5 * (attempt + 1))
-        return None
-    t0 = time.time()
-    with ThreadPoolExecutor(10) as ex:
-        files = [f for f in ex.map(get, jobs) if f]
-    log("downloaded", len(files), "files,", round(sum(os.path.getsize(f) for f in files) / 1e6), "MB in", round(time.time() - t0), "s")
+                log("  check", c, st, e)
+        if run: break
+    if not run:
+        raise SystemExit("no complete ECMWF run found")
+    log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
+    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"}
+    PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {850, 700}, "gh": {850, 700}}
+    seen = set()
+    def get(step):
+        target = "ec_%03d.grib2" % step
+        idx = http_get(ec_path(run, stream, step, "index"))
+        if not idx:
+            log("  no index for step", step); return None
+        want = []
+        for line in idx.splitlines():
+            if not line.strip(): continue
+            j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
+            if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PL and lev is not None and int(lev) in PL[p]):
+                want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
+        want.sort(); ranges = []
+        for o, n in want:   # merge neighbours -> fewer requests
+            if ranges and o == ranges[-1][1] + 1: ranges[-1][1] = o + n - 1
+            else: ranges.append([o, o + n - 1])
+        with open(target, "wb") as f:
+            for o, e in ranges:
+                f.write(http_get(ec_path(run, stream, step, "grib2"), (o, e)))
+        return target
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time(); files = []
+    with ThreadPoolExecutor(6) as ex:
+        for f in ex.map(get, STEPS):
+            if f: files.append(f)
+    log("downloaded", len(files), "steps,", round(sum(os.path.getsize(f) for f in files) / 1e6), "MB in", round(time.time() - t0), "s; params", sorted(seen))
+    sfc_ok, pl_ok = sorted(seen & SFC), sorted(seen & set(PL))
     got = set(sfc_ok + pl_ok)
     import eccodes
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
@@ -191,6 +225,7 @@ def ecmwf():
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
+    run = run.replace(tzinfo=None)
     return run, got
 
 # ── GFS visibility + ground height (NOAA, public domain) ──
