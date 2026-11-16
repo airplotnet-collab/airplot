@@ -164,8 +164,10 @@ def http_get(path, rng=None, tries=8):
         time.sleep(min(30, 2 * (attempt + 1)))
     raise RuntimeError(last or "download failed")
 
-def ec_path(run, stream, step, ext):
-    return ("%s/%02dz/ifs/" + RESOL + "/%s/%s%02d0000-%dh-%s-fc.%s") % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, ext)
+# the 0.25 deg set has one file per step (...-fc.grib2); the 9 km set two: surface (-fc-sfc) and pressure levels (-fc-pl)
+PARTS = ["fc-sfc", "fc-pl"] if NINE else ["fc"]
+def ec_path(run, stream, step, ext, part="fc"):
+    return ("%s/%02dz/ifs/" + RESOL + "/%s/%s%02d0000-%dh-%s-%s.%s") % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, part, ext)
 
 def ecmwf():
     # newest run whose last step is out (00/12Z: stream "oper"; 06/18Z: "scda" or "oper")
@@ -175,7 +177,7 @@ def ecmwf():
         c = now - dt.timedelta(hours=back); c = c.replace(hour=c.hour - c.hour % 6)
         for st in ("oper", "scda"):
             try:
-                if http_get(ec_path(c, st, STEPS[-1], "index"), tries=2):
+                if all(http_get(ec_path(c, st, STEPS[-1], "index", pt), tries=2) for pt in PARTS):
                     run, stream = c, st; break
             except Exception as e:
                 log("  check", c, st, e)
@@ -188,23 +190,24 @@ def ecmwf():
     seen = set()
     def get(step):
         target = "ec_%03d.grib2" % step
-        idx = http_get(ec_path(run, stream, step, "index"))
-        if not idx:
-            log("  no index for step", step); return None
-        want = []
-        for line in idx.splitlines():
-            if not line.strip(): continue
-            j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
-            if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PL and lev is not None and int(lev) in PL[p]):
-                want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
-        want.sort(); ranges = []
-        for o, n in want:   # merge neighbours -> fewer requests
-            if ranges and o == ranges[-1][1] + 1: ranges[-1][1] = o + n - 1
-            else: ranges.append([o, o + n - 1])
         with open(target, "wb") as f:
-            for o, e in ranges:
-                f.write(http_get(ec_path(run, stream, step, "grib2"), (o, e)))
-        return target
+            for pt in PARTS:
+                idx = http_get(ec_path(run, stream, step, "index", pt))
+                if not idx:
+                    log("  no index for step", step, pt); continue
+                want = []
+                for line in idx.splitlines():
+                    if not line.strip(): continue
+                    j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
+                    if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PL and lev is not None and int(lev) in PL[p]):
+                        want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
+                want.sort(); ranges = []
+                for o, n in want:   # merge neighbours -> fewer requests
+                    if ranges and o == ranges[-1][1] + 1: ranges[-1][1] = o + n - 1
+                    else: ranges.append([o, o + n - 1])
+                for o, e in ranges:
+                    f.write(http_get(ec_path(run, stream, step, "grib2", pt), (o, e)))
+        return target if os.path.getsize(target) else None
     from concurrent.futures import ThreadPoolExecutor
     t0 = time.time(); files = []
     with ThreadPoolExecutor(6) as ex:
