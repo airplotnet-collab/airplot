@@ -186,7 +186,7 @@ def ecmwf():
     if not run:
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
-    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"}
+    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"}
     PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {850, 700}, "gh": {850, 700}}
     seen = set()
     def get(step):
@@ -254,7 +254,8 @@ def ecmwf():
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
-    # (2026-11-15) later in the run ECMWF gives the gust less often (every 6 h): fill a missing step from the
+    # (2026-11-16) after step 90 ECMWF names the gust "10fg3" (max of the last 3 h), not "10fg" - both are read now.
+    # (2026-11-15) a step still without a gust: fill it from the
     # next one (its max covers this time), else from the one before
     have = [k for k in range(NS) if not np.isnan(data["gust"][k]).all()]
     for k in range(NS):
