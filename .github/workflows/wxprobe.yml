@@ -1,0 +1,15 @@
+name: Check ECMWF open data for visibility (one-off)
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ecmwf-tiles]
+    paths: ['wxtiles/probe_vis.py', '.github/workflows/wxprobe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install requests && python wxtiles/probe_vis.py
