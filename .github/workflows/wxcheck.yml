@@ -2,7 +2,7 @@ name: Check one spot (one-off)
 on:
   workflow_dispatch: {}
   push:
-    branches: [vis-check]
+    branches: [vis-check, vis-rh]
     paths: ['wxtiles/check_vis.py', 'wxtiles/vis_rules.py', '.github/workflows/wxcheck.yml']
 permissions:
   contents: read

@@ -50,14 +50,14 @@ for o in obs:
     if ov is None: continue
     if any(np.isnan(x) for x in (s["t2"][st], s["td2"][st], wind)): continue
     rows.append((o["icaoId"], m["steps"][st], min(ov, 10), est, min(float(s["vis"][st]), 10) if not np.isnan(s["vis"][st]) else np.nan,
-                 round(s["t2"][st] - s["td2"][st], 1), round(wind), round(s["tp"][st], 2), round(s["sf"][st], 2), o.get("wxString") or ""))
+                 round(s["t2"][st] - s["td2"][st], 2), round(wind), round(s["tp"][st], 2), round(s["sf"][st], 2), o.get("wxString") or "", float(s["t2"][st])))
 rows.sort()
 open("rows.json", "w").write(json.dumps(rows))
 
 print("run", m["run"], "-", len(rows), "matched obs\n")
 print("STN   +h   OBS  RULES   GFS  spread wind  tp3h  sf3h  wx")
 for r in rows:
-    if r[2] <= 5: print("%s %4d %5.2f %6.2f %5.2f  %5.1f %4d %5.2f %5.2f  %s" % r)
+    if r[2] <= 5: print("%s %4d %5.2f %6.2f %5.2f  %5.1f %4d %5.2f %5.2f  %s" % r[:10])
 cat = lambda v: 0 if v < 1 else 1 if v < 3 else 2 if v <= 5 else 3
 names = ["<1", "1-3", "3-5", ">5"]
 for col, lab in ((3, "RULES"), (4, "GFS")):
@@ -72,40 +72,51 @@ for col, lab in ((3, "RULES"), (4, "GFS")):
     fa = sum(r[col] <= 5 and r[2] > 5 for r in good)
     print("  obs <= 5 SM: caught %d/%d · forecast <= 5 SM but obs > 5: %d" % (low_hit, len(low_obs), fa))
 
-# ── tuning: the same rule structure, thresholds searched for the best match with the METARs ──
+# ── RH-based rules (2026-11-16, CN: "<2 C will have fog, often 3 C has mist - work with RH") ──
 import itertools
 obsv = np.array([r[2] for r in rows]); sp = np.array([r[5] for r in rows], float); w = np.array([r[6] for r in rows], float)
 tp = np.array([r[7] for r in rows], float); sf = np.array([r[8] for r in rows], float)
-def rule(p):
-    fs, fw, ms, mw, rm, rh = p
-    v = np.full(len(rows), 10.0)
-    fog = sp < fs
-    v = np.where(fog & (w < fw), np.where(sp < fs / 2, 0.25, 0.5), v)
-    v = np.where(fog & (w >= fw) & (w < fw + 5), np.minimum(v, 1.0), v)
-    mist = (sp < ms) & (w < mw)
-    v = np.where(mist, np.minimum(v, 4.0), v)
+t2 = np.array([r[10] for r in rows], float); td = t2 - sp
+es = lambda x: np.exp(17.625 * x / (243.04 + x))
+rh = 100 * es(td) / es(t2)
+def precip(v):
     rain = np.maximum(0, tp - sf) / 3; snow = sf / 3
-    v = np.minimum(v, np.where(rain >= rh, 3.0, np.where(rain >= rm, 5.0, 10.0)))
+    v = np.minimum(v, np.where(rain >= 2.0, 3.0, np.where(rain >= 0.5, 5.0, 10.0)))
     sv = np.where(snow >= 3, 1.0, np.where(snow > 1.5, 2.0 - (snow - 1.5) / 1.5, np.where(snow >= 0.5, 5.0 - (snow - 0.5) * 2.0, np.where(snow > 0.05, 6.0, 10.0))))
     return np.minimum(v, sv)
-def score(f):  # critical success index for "5 SM or less", and for "under 3 SM"
+def rule_rh(fr, mr, calm, lift):
+    v = np.full(len(rows), 10.0)
+    fog = rh >= fr
+    v = np.where(fog & (w < calm), np.where(rh >= (fr + 100) / 2, 0.25, 0.5), v)
+    v = np.where(fog & (w >= calm) & (w < lift), 1.0, v)
+    v = np.where(fog & (w >= lift), 4.0, v)
+    v = np.where(~fog & (rh >= mr) & (w < lift), np.minimum(v, 4.0), v)
+    return precip(v)
+def rule_spread(fs, ms, calm, lift):
+    v = np.full(len(rows), 10.0)
+    fog = sp < fs
+    v = np.where(fog & (w < calm), np.where(sp < fs / 2, 0.25, 0.5), v)
+    v = np.where(fog & (w >= calm) & (w < lift), 1.0, v)
+    v = np.where(fog & (w >= lift), 4.0, v)
+    v = np.where(~fog & (sp < ms) & (w < lift), np.minimum(v, 4.0), v)
+    return precip(v)
+def stats(f):
     out = []
     for th in (5, 2.99):
         a = np.sum((obsv <= th) & (f <= th)); b = np.sum((obsv > th) & (f <= th)); c = np.sum((obsv <= th) & (f > th))
-        out.append(a / max(1, a + b + c))
+        out += [a / max(1, a + b + c), int(a), int(b)]
     return out
-grid = itertools.product([0.3, 0.5, 0.75, 1.0, 1.5, 2.0], [2, 3, 5, 8], [0.5, 1.0, 1.5, 2.0, 3.0, 4.0], [3, 5, 8, 10], [0.3, 0.5, 1.0, 1.5], [2.0, 3.0, 4.0])
-res = sorted(((sum(score(rule(p))), p, score(rule(p))) for p in grid if p[2] >= p[0]), key=lambda x: -x[0])
-print("\nobs <= 5 SM: %d of %d · under 3 SM: %d" % (np.sum(obsv <= 5), len(obsv), np.sum(obsv < 3)))
-print("CN's first numbers (2, 5, 4, 10, 1, 4): CSI<=5 %.2f, CSI<3 %.2f" % tuple(score(rule((2, 5, 4, 10, 1, 4)))))
-print("GFS: CSI<=5 %.2f, CSI<3 %.2f" % tuple(score(np.array([r[4] if not np.isnan(r[4]) else 10 for r in rows]))))
-print("best (fog spread, fog wind, mist spread, mist wind, moderate rain mm/h, heavy rain mm/h):")
-for t in res[:12]: print("  %s  CSI<=5 %.2f  CSI<3 %.2f" % (t[1], t[2][0], t[2][1]))
-best = res[0][1]; f = rule(best)
-cat = lambda v: 0 if v < 1 else 1 if v < 3 else 2 if v <= 5 else 3
-M = np.zeros((4, 4), int)
-for o, x in zip(obsv, f): M[cat(o), cat(x)] += 1
-print("best, obs (rows) vs estimate (cols) <1 1-3 3-5 >5:"); print(M)
-# what the low cases were (precip or not)
-lo = obsv <= 5
-print("low obs with rain in the model (>0.3 mm/h): %d / %d; with spread < 1: %d" % (np.sum(lo & ((tp - sf) / 3 > 0.3)), np.sum(lo), np.sum(lo & (sp < 1))))
+gfs = np.array([r[4] if not np.isnan(r[4]) else 10 for r in rows])
+print("\n%d obs · <= 5 SM: %d · under 3 SM: %d · RH quantiles 10/25/50/75/90%%: %s" % (len(rows), np.sum(obsv <= 5), np.sum(obsv < 3), np.round(np.percentile(rh, [10, 25, 50, 75, 90]), 1)))
+print("RH where obs <= 5 SM, quantiles: %s · where obs > 5: %s" % (np.round(np.percentile(rh[obsv <= 5], [10, 25, 50, 75]), 1), np.round(np.percentile(rh[obsv > 5], [50, 75, 90]), 1)))
+fmt = lambda name, st: print("%-48s CSI<=5 %.2f (hit %3d, false %3d) · CSI<3 %.2f (hit %3d, false %3d)" % (name, *st))
+fmt("GFS (old)", stats(gfs))
+fmt("CN: spread<2 fog, <3 mist, 5/10 kt", stats(rule_spread(2, 3, 5, 10)))
+fmt("live now: spread<1.5 fog, 5/10 kt", stats(rule_spread(1.5, 1.5, 5, 10)))
+res = []
+for fr, mr, calm, lift in itertools.product([90, 92, 94, 95, 96, 97, 98], [80, 83, 85, 87, 89, 91, 93], [3, 5, 8], [10, 15]):
+    if mr >= fr: continue
+    st = stats(rule_rh(fr, mr, calm, lift)); res.append((st[0] + st[3], (fr, mr, calm, lift), st))
+res.sort(key=lambda x: -x[0])
+print("best RH rules (fog RH, mist RH, calm kt, lift kt):")
+for t in res[:10]: fmt("  RH fog>=%d mist>=%d, %d/%d kt" % t[1], t[2])
