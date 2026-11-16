@@ -64,7 +64,9 @@ def ceil_now(v):
     if v["lcc"] >= 60: return min(6500, max(100, sp * 400))
     if v["mcc"] >= 60: return 6500
     return None
-def ceil_rh(v, thr, lcc_min, w_min, fallback):
+def ceil_rh(v, thr, lcc_min, w_min, fallback, fog=200):
+    # fog: the 2 m air this humid gives a (very low) ceiling even without model low cloud (fog / stratus it misses)
+    if 100 * es(v["td2"]) / es(v["t2"]) >= fog: return max(100, (v["t2"] - v["td2"]) * 400)
     low = v["lcc"] >= lcc_min or (w_min > 0 and not np.isnan(v["tclw"]) and v["tclw"] >= w_min)
     if low:
         rh2 = 100 * es(v["td2"]) / es(v["t2"]); sp = v["t2"] - v["td2"]
@@ -103,15 +105,15 @@ n1k = sum(1 for r in rows if r["obs"] is not None and r["obs"] < 1000); n3k = su
 print("observed: ceiling < 1000 ft:", n1k, " <= 3000 ft:", n3k, " of", len(rows), "\n")
 fmt("now: lcc>=60 spread x 400", score(ceil_now))
 res = []
-for thr, lmin, wmin, fb in itertools.product((85, 88, 90, 92, 94, 96), (30, 40, 50, 60, 70), (0, 0.05, 0.1, 0.2), (False, True)):
-    sc = score(lambda v: ceil_rh(v, thr, lmin, wmin, fb))
-    res.append(((sc[1000][0] + sc[3001][0]) / 2, (thr, lmin, wmin, fb), sc))
+for thr, lmin, wmin, fb, fog in itertools.product((88, 90, 91, 92, 93, 94), (30, 40, 50, 60), (0, 0.1), (False,), (200, 99, 98, 97, 96)):
+    sc = score(lambda v: ceil_rh(v, thr, lmin, wmin, fb, fog))
+    res.append(((sc[1000][0] + sc[3001][0]) / 2, (thr, lmin, wmin, fb, fog), sc))
 res.sort(key=lambda x: -x[0])
 print("\nbest RH rules (RH thr, low cloud min %, cloud water min kg/m2, fall back to spread):")
-for t in res[:12]: fmt("  RH>=%d lcc>=%d tclw>=%.2f fb=%s" % t[1], t[2])
+for t in res[:14]: fmt("  RH>=%d lcc>=%d tclw>=%.2f fb=%s fogRH>=%d" % t[1], t[2])
 best = res[0][1]
 print("\nsample (best rule): STN +h  OBS  NOW  RH-rule  lcc  rh2  r1000 r925 r850  tclw")
-for r in rows[:400]:
+for r in rows[:0]:
     if r["obs"] is not None and r["obs"] <= 3000:
         print("%s %3d %5s %5s %6s %4.0f %4.0f %5.0f %4.0f %4.0f %5.2f" % (r["id"], r["h"], int(r["obs"]), ceil_now(r) and int(ceil_now(r)), (ceil_rh(r, *best) and int(ceil_rh(r, *best))),
               r["lcc"], 100 * es(r["td2"]) / es(r["t2"]), r["r1000"], r["r925"], r["r850"], r["tclw"]))
