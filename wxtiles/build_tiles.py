@@ -3,7 +3,8 @@
 wxtiles/build_tiles.py - Airplot's own model data for the TAF Map "ECMWF forecast" chart (2026-11-15).
 
 Downloads the latest ECMWF IFS open-data run (0.25 deg, CC BY 4.0 - commercial use allowed with
-attribution: "ECMWF") plus GFS visibility (NOAA, public domain - ECMWF open data has no visibility),
+attribution: "ECMWF"), with visibility estimated from its own fields (vis_rules.py - ECMWF open data has no
+visibility) and the model ground height from NOAA GFS (public domain),
 and cuts the globe into small 10 x 10 degree tiles the browser can read for any spot:
 
   site/wx/meta.json                      run time, steps, variable list and encodings
@@ -88,7 +89,7 @@ VARS = [
     ("v700",  "i1", 1.0, 0.0,    "lin"),
     ("r850",  "u1", 1.0, 0.0,    "lin"),   # humidity aloft, %
     ("r700",  "u1", 1.0, 0.0,    "lin"),
-    ("vis",   "u1", 0.05, 0.0,   "lin"),   # visibility (GFS), statute miles (max 12.7)
+    ("vis",   "u1", 0.05, 0.0,   "lin"),   # visibility, statute miles (max 12.7) - estimated from ECMWF (vis_rules.py)
 ]
 MISSING = {"i1": -128, "u1": 255, "i2": -32768}
 LIMITS = {"i1": (-127, 127), "u1": (0, 254), "i2": (-32767, 32767)}
@@ -264,7 +265,7 @@ def ecmwf():
     run = run.replace(tzinfo=None)
     return run, got
 
-# ── GFS visibility + ground height (NOAA, public domain) ──
+# ── GFS ground height (NOAA, public domain) ──
 _gfs_w = None
 def gfs_to_ours(g):
     """a 0.25 deg global field (721 x 1440) -> our grid / region tiles."""
@@ -323,27 +324,7 @@ def gfs(run_ec):
     f0 = fetch(0, ["HGT:surface"])
     if "HGT:surface" in f0:
         elev[:] = f0["HGT:surface"]; have_elev = True
-    def one(k):
-        valid = run_ec + dt.timedelta(hours=STEPS[k])
-        fh = int((valid - c).total_seconds() // 3600)
-        if fh < 0 or fh > 384: return k, None
-        fh -= fh % 3
-        for attempt in range(3):
-            try:
-                return k, fetch_raw(fh, ["VIS:surface"]).get("VIS:surface")
-            except Exception as e:
-                log("  GFS retry", fh, e); time.sleep(5)
-        return k, None
-    from concurrent.futures import ThreadPoolExecutor
-    t0 = time.time()
-    with ThreadPoolExecutor(10) as ex:
-        raws = list(ex.map(one, range(NS)))
-    for k, raw in raws:
-        if raw:
-            g = decode(raw)
-            if g is not None: data["vis"][k] = g / 1609.34
-    log("GFS visibility in", round(time.time() - t0), "s")
-    log("GFS visibility steps:", int(np.sum([~np.isnan(data["vis"][k]).all() for k in range(NS)])))
+    # (2026-11-15, CN) no GFS visibility any more: it is estimated from ECMWF's own fields (vis_rules.py)
     return c
 
 def pack(name, dtype, scale, offset, tr, arr):
@@ -388,9 +369,10 @@ def write_tiles(run, gfs_cycle):
                 f.write(blob)
             n += 1; total += len(blob)
     meta = {
-        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility: NOAA GFS 0.25 deg",
+        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: NOAA GFS",
+        "vis": "estimated",
         "resol": RESOL, "tiles": ["%d_%d" % t for t in TILES9] if NINE else None, "regions": {k: [[min(a), max(a) + TILE], [min(b), max(b) + TILE]] for k, (a, b) in REGIONS.items()} if NINE else None,
-        "attribution": "Contains ECMWF data, CC BY 4.0. Visibility: NOAA GFS.",
+        "attribution": "Contains modified ECMWF data, CC BY 4.0.",
         "run": run.strftime("%Y-%m-%dT%H:%MZ"), "gfs": gfs_cycle.strftime("%Y-%m-%dT%H:%MZ") if gfs_cycle else None,
         "made": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
         "steps": STEPS, "tile": TILE, "res": RES, "n": TP, "hasElev": have_elev,
@@ -404,9 +386,14 @@ def write_tiles(run, gfs_cycle):
 if __name__ == "__main__":
     run, got = ecmwf()
     try:
-        c = gfs(run)
+        c = gfs(run)   # the model ground height only
     except Exception as e:
-        log("GFS failed (no visibility this run):", e); c = None
+        log("GFS ground height failed:", e); c = None
+    # visibility from ECMWF's own fields (dew-point spread, 10 m wind, rain, snow) - see vis_rules.py
+    from vis_rules import vis_sm
+    for k in range(NS):
+        data["vis"][k] = vis_sm(data["t2"][k], data["td2"][k], np.hypot(data["u10"][k], data["v10"][k]), data["tp"][k], data["sf"][k])
+    log("visibility estimated from ECMWF fields; share of points under 3 SM at step 12: %.3f" % float(np.nanmean(data["vis"][min(4, NS - 1)] < 3)))
     for name, *_ in VARS:
         miss = int(np.isnan(data[name]).all(axis=tuple(range(1, data[name].ndim))).sum())
         log(f"{name:5s} missing steps: {miss}/{NS}")
