@@ -29,5 +29,5 @@ for back in range(0, 30, 6):
             found_any |= has
             print(f'  {r}/{stream}: {len(files)} steps, sample {name}: {len(params)} params -> vis {"FOUND" if has else "not found"}')
             print('    params:', ' '.join(p for p in params if p))
-    break
+    if any(r != '0p25' for r in res): break  # keep going back until a run with the 9 km set
 print('::notice title=ECMWF visibility::' + ('vis FOUND in free open data' if found_any else 'vis NOT in free open data'))
