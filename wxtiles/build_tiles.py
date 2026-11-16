@@ -225,6 +225,14 @@ def ecmwf():
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
+    # (2026-11-15) later in the run ECMWF gives the gust less often (every 6 h): fill a missing step from the
+    # next one (its max covers this time), else from the one before
+    have = [k for k in range(NS) if not np.isnan(data["gust"][k]).all()]
+    for k in range(NS):
+        if k in have or not have: continue
+        nxt = [h for h in have if h > k]; prv = [h for h in have if h < k]
+        data["gust"][k] = data["gust"][nxt[0] if nxt else prv[-1]]
+    log("gust steps filled:", NS - len(have))
     run = run.replace(tzinfo=None)
     return run, got
 
