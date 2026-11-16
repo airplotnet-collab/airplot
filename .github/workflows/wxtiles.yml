@@ -1,0 +1,71 @@
+name: Model data tiles (ECMWF + GFS visibility)
+
+# Airplot's own forecast data for the TAF Map "ECMWF forecast" chart (wxmap.html):
+# the latest ECMWF IFS open-data run (0.25 deg, CC BY 4.0) + GFS visibility (NOAA), cut into
+# 10 x 10 degree tiles for the whole globe (wxtiles/build_tiles.py), published with GitHub Pages:
+#   https://airplotnet-collab.github.io/airplot/wx/meta.json
+#   https://airplotnet-collab.github.io/airplot/wx/t/<lat0>_<lon0>.bin
+# One-time setup: repo Settings > Pages > Build and deployment > Source: "GitHub Actions".
+#
+# ECMWF open data appears ~7-8 h after each run (00/06/12/18Z); these times pick up each new run.
+on:
+  schedule:
+    - cron: '20 2,8,14,20 * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [ecmwf-tiles]          # test builds on the work branch (built, not published)
+    paths: ['wxtiles/**', '.github/workflows/wxtiles.yml']
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: wxtiles
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy requests ecmwf-opendata eccodes eccodeslib
+          python -c "import eccodes; print('eccodes', eccodes.codes_get_api_version())"
+
+      - name: Build tiles
+        working-directory: wxtiles
+        env:
+          WX_OUT: ${{ github.workspace }}/site/wx
+        run: python build_tiles.py
+
+      - name: Size
+        run: |
+          du -sh site/wx; ls site/wx/t | wc -l; cat site/wx/meta.json | head -c 600; echo
+          echo "::notice title=Tiles::$(du -sh site/wx | cut -f1) in $(ls site/wx/t | wc -l) tiles, run $(python -c "import json;print(json.load(open('site/wx/meta.json'))['run'])")"
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
