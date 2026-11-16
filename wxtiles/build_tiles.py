@@ -90,6 +90,13 @@ VARS = [
     ("r850",  "u1", 1.0, 0.0,    "lin"),   # humidity aloft, %
     ("r700",  "u1", 1.0, 0.0,    "lin"),
     ("vis",   "u1", 0.05, 0.0,   "lin"),   # visibility, statute miles (max 12.7) - estimated from ECMWF (vis_rules.py)
+    # (2026-11-16, CN) for the ceiling estimate (ECMWF open data has no cloud base): humidity and heights of the two
+    # lowest levels, and the cloud liquid water in the column (high under real stratus / fog)
+    ("z1000", "i2", 1.0, 0.0,    "lin"),   # heights of 1000 / 925 hPa, m ASL (1000 hPa can be below sea level)
+    ("z925",  "i2", 1.0, 0.0,    "lin"),
+    ("r1000", "u1", 1.0, 0.0,    "lin"),   # humidity, %
+    ("r925",  "u1", 1.0, 0.0,    "lin"),
+    ("tclw",  "u1", 0.01, 0.0,   "sqrt"),  # total column cloud liquid water, kg/m2 (= mm), up to 6.4
 ]
 MISSING = {"i1": -128, "u1": 255, "i2": -32768}
 LIMITS = {"i1": (-127, 127), "u1": (0, 254), "i2": (-32767, 32767)}
@@ -186,8 +193,8 @@ def ecmwf():
     if not run:
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
-    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"}
-    PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {850, 700}, "gh": {850, 700}}
+    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
+    PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700}, "gh": {1000, 925, 850, 700}}
     seen = set()
     def get(step):
         target = "ec_%03d.grib2" % step
@@ -237,9 +244,10 @@ def ecmwf():
         elif sn in ("tp", "sf"): acc.setdefault(sn, {})[k] = g * 1000.0   # m -> mm
         elif sn in ("mucape", "cape"): data["cape"][k] = g
         elif sn == "t" and lev in (925, 850, 700, 500): data["t%d" % lev][k] = g - 273.15
-        elif sn == "gh" and lev in (850, 700): data["z%d" % lev][k] = g
+        elif sn == "gh" and lev in (1000, 925, 850, 700): data["z%d" % lev][k] = g
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
-        elif sn == "r" and lev in (850, 700): data["r%d" % lev][k] = g
+        elif sn == "r" and lev in (1000, 925, 850, 700): data["r%d" % lev][k] = np.clip(g, 0, 100)
+        elif sn == "tclw": data["tclw"][k] = g
     t0 = time.time(); nf = 0
     for f in files:
         nf += read_grib(f, lambda gid, g: handle(gid, cut(g))); os.remove(f)
