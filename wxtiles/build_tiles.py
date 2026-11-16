@@ -115,31 +115,79 @@ def read_grib(path, handle):
     return n
 
 # ── ECMWF ──
-def ecmwf():
-    from ecmwf.opendata import Client
-    client = Client(source=os.environ.get("ECMWF_SOURCE", "aws"), model="ifs", resol="0p25")
-    run = client.latest(type="fc", step=120, param="2t")
-    log("ECMWF run", run)
-    sfc = ["2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"]
-    got = set()
-    for params, extra, target in [(sfc, {}, "ec_sfc.grib2"), (["t", "u", "v", "r", "gh"], {"levelist": [925, 850, 700, 500]}, "ec_pl.grib2")]:
-        ok = list(params)
+# (2026-11-15) our own downloader: the ecmwf-opendata client waited 120 s after every "503 busy" from the
+# mirror and the job ran out of time. Here: read each step's .index, fetch only our fields (adjacent ones
+# merged into one request), short retries, and switch mirror (AWS -> ECMWF's own server) when one is busy.
+MIRRORS = [m for m in os.environ.get("ECMWF_MIRRORS", "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com,https://data.ecmwf.int/forecasts").split(",") if m]
+SESSION = requests.Session()
+SESSION.mount("https://", requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16))
+
+def http_get(path, rng=None, tries=8):
+    """GET from the first mirror that answers; short backoff on 429/5xx."""
+    last = None
+    for attempt in range(tries):
+        m = MIRRORS[attempt % len(MIRRORS)]
         try:
-            client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=STEPS, param=ok, target=target, **extra)
+            r = SESSION.get(m + "/" + path, headers={"Range": "bytes=%d-%d" % rng} if rng else None, timeout=120)
+            if r.status_code in (200, 206):
+                return r.content if rng else r.text
+            if r.status_code == 404:
+                return None
+            last = "HTTP %d from %s" % (r.status_code, m.split("/")[2])
         except Exception as e:
-            # a parameter this run does not have: find it (one small request each) and leave it out
-            log("retrieve failed:", str(e)[:300])
-            good = []
-            for p in params:
-                try:
-                    client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=[3], param=[p], target="probe.grib2", **extra)
-                    good.append(p)
-                except Exception as e2:
-                    log("  not available:", p, str(e2)[:120])
-            ok = good
-            client.retrieve(date=run.strftime("%Y%m%d"), time=run.hour, type="fc", step=STEPS, param=ok, target=target, **extra)
-        log("downloaded", target, round(os.path.getsize(target) / 1e6), "MB")
-        got.update(ok)
+            last = str(e)[:100]
+        time.sleep(min(30, 2 * (attempt + 1)))
+    raise RuntimeError(last or "download failed")
+
+def ec_path(run, stream, step, ext):
+    return "%s/%02dz/ifs/0p25/%s/%s%02d0000-%dh-%s-fc.%s" % (run.strftime("%Y%m%d"), run.hour, stream, run.strftime("%Y%m%d"), run.hour, step, stream, ext)
+
+def ecmwf():
+    # newest run whose last step is out (00/12Z: stream "oper"; 06/18Z: "scda" or "oper")
+    now = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    run = stream = None
+    for back in range(0, 48, 6):
+        c = now - dt.timedelta(hours=back); c = c.replace(hour=c.hour - c.hour % 6)
+        for st in ("oper", "scda"):
+            try:
+                if http_get(ec_path(c, st, STEPS[-1], "index"), tries=2):
+                    run, stream = c, st; break
+            except Exception as e:
+                log("  check", c, st, e)
+        if run: break
+    if not run:
+        raise SystemExit("no complete ECMWF run found")
+    log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
+    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape"}
+    PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {850, 700}, "gh": {850, 700}}
+    seen = set()
+    def get(step):
+        target = "ec_%03d.grib2" % step
+        idx = http_get(ec_path(run, stream, step, "index"))
+        if not idx:
+            log("  no index for step", step); return None
+        want = []
+        for line in idx.splitlines():
+            if not line.strip(): continue
+            j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
+            if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PL and lev is not None and int(lev) in PL[p]):
+                want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
+        want.sort(); ranges = []
+        for o, n in want:   # merge neighbours -> fewer requests
+            if ranges and o == ranges[-1][1] + 1: ranges[-1][1] = o + n - 1
+            else: ranges.append([o, o + n - 1])
+        with open(target, "wb") as f:
+            for o, e in ranges:
+                f.write(http_get(ec_path(run, stream, step, "grib2"), (o, e)))
+        return target
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time(); files = []
+    with ThreadPoolExecutor(6) as ex:
+        for f in ex.map(get, STEPS):
+            if f: files.append(f)
+    log("downloaded", len(files), "steps,", round(sum(os.path.getsize(f) for f in files) / 1e6), "MB in", round(time.time() - t0), "s; params", sorted(seen))
+    sfc_ok, pl_ok = sorted(seen & SFC), sorted(seen & set(PL))
+    got = set(sfc_ok + pl_ok)
     import eccodes
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
     def handle(gid, g):
@@ -163,9 +211,10 @@ def ecmwf():
         elif sn == "gh" and lev in (850, 700): data["z%d" % lev][k] = g
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (850, 700): data["r%d" % lev][k] = g
-    for f in ("ec_sfc.grib2", "ec_pl.grib2"):
-        if os.path.exists(f):
-            log("decoded", f, read_grib(f, handle), "fields")
+    t0 = time.time(); nf = 0
+    for f in files:
+        nf += read_grib(f, handle); os.remove(f)
+    log("decoded", nf, "fields in", round(time.time() - t0), "s")
     for sn, byk in acc.items():
         prev = None
         for k in range(NS):
@@ -176,6 +225,15 @@ def ecmwf():
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
+    # (2026-11-15) later in the run ECMWF gives the gust less often (every 6 h): fill a missing step from the
+    # next one (its max covers this time), else from the one before
+    have = [k for k in range(NS) if not np.isnan(data["gust"][k]).all()]
+    for k in range(NS):
+        if k in have or not have: continue
+        nxt = [h for h in have if h > k]; prv = [h for h in have if h < k]
+        data["gust"][k] = data["gust"][nxt[0] if nxt else prv[-1]]
+    log("gust steps filled:", NS - len(have))
+    run = run.replace(tzinfo=None)
     return run, got
 
 # ── GFS visibility + ground height (NOAA, public domain) ──
@@ -196,7 +254,7 @@ def gfs(run_ec):
         log("no GFS cycle found - no visibility"); return None
     log("GFS cycle", c)
     import eccodes
-    def fetch(fh, pats):
+    def fetch_raw(fh, pats):   # bytes of the wanted fields (network only - safe in threads)
         base = f"{GFS}/gfs.{c:%Y%m%d}/{c:%H}/atmos/gfs.t{c:%H}z.pgrb2.0p25.f{fh:03d}"
         idx = requests.get(base + ".idx", timeout=60)
         if idx.status_code != 200: return {}
@@ -204,27 +262,40 @@ def gfs(run_ec):
         for i, line in enumerate(lines):
             parts = line.split(":")
             key = parts[3] + ":" + parts[4]
-            for p in pats:
-                if key == p:
-                    start = int(parts[1]); end = int(lines[i + 1].split(":")[1]) - 1 if i + 1 < len(lines) else ""
-                    r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
-                    fn = f"gfs_{fh}_{len(out)}.grib2"; open(fn, "wb").write(r.content)
-                    res = {}
-                    read_grib(fn, lambda gid, g: res.setdefault("g", g))
-                    os.remove(fn)
-                    if "g" in res: out[p] = res["g"]
+            if key in pats:
+                start = int(parts[1]); end = int(lines[i + 1].split(":")[1]) - 1 if i + 1 < len(lines) else ""
+                r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
+                if r.status_code in (200, 206): out[key] = r.content
         return out
+    def decode(raw):
+        fn = "gfs_tmp.grib2"; open(fn, "wb").write(raw); res = {}
+        read_grib(fn, lambda gid, g: res.setdefault("g", g)); os.remove(fn)
+        return res.get("g")
+    def fetch(fh, pats):
+        return {k: g for k, g in ((k, decode(b)) for k, b in fetch_raw(fh, pats).items()) if g is not None}
     f0 = fetch(0, ["HGT:surface"])
     if "HGT:surface" in f0:
         elev[:] = f0["HGT:surface"]; have_elev = True
-    for k, s in enumerate(STEPS):
-        valid = run_ec + dt.timedelta(hours=s)
+    def one(k):
+        valid = run_ec + dt.timedelta(hours=STEPS[k])
         fh = int((valid - c).total_seconds() // 3600)
-        if fh < 0 or fh > 384: continue
+        if fh < 0 or fh > 384: return k, None
         fh -= fh % 3
-        v = fetch(fh, ["VIS:surface"])
-        if "VIS:surface" in v:
-            data["vis"][k] = v["VIS:surface"] / 1609.34
+        for attempt in range(3):
+            try:
+                return k, fetch_raw(fh, ["VIS:surface"]).get("VIS:surface")
+            except Exception as e:
+                log("  GFS retry", fh, e); time.sleep(5)
+        return k, None
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time()
+    with ThreadPoolExecutor(10) as ex:
+        raws = list(ex.map(one, range(NS)))
+    for k, raw in raws:
+        if raw:
+            g = decode(raw)
+            if g is not None: data["vis"][k] = g / 1609.34
+    log("GFS visibility in", round(time.time() - t0), "s")
     log("GFS visibility steps:", int(np.sum([~np.isnan(data["vis"][k]).all() for k in range(NS)])))
     return c
 
