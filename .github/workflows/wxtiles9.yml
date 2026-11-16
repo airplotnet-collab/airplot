@@ -50,6 +50,7 @@ jobs:
 
       - name: Upload to Cloudflare R2 (wx.airplot.net/wx9)
         if: github.ref == 'refs/heads/main'
+        continue-on-error: true   # (2026-11-15) a refused R2 upload must not stop the GitHub Pages copy
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
