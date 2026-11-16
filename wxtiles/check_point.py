@@ -16,6 +16,20 @@ def tile_series(base):
         a = (a * v["scale"]) ** 2 if v["tr"] == "sqrt" else a * v["scale"] + v["offset"]
         out[v["name"]] = a; off += NS * N * N * sz
     return m, out
+import sys as _s
+sys.path.insert(0, ".")
+from vis_rules import vis_sm, rh_pct
+for base in ["https://wx.airplot.net/wx9/", "https://wx.airplot.net/wx/"]:
+    try:
+        m, o = tile_series(base)
+        print("==", base, "run", m["run"], "made", m.get("made"), "tile", m["tile"], "res", m["res"])
+        print("step  vis  t2  td2  rh  w10kt  tp  sf  recomputed")
+        for k, h in enumerate(m["steps"][:20]):
+            w = np.hypot(o["u10"][k], o["v10"][k])
+            print("%3d %5.2f %5.1f %5.1f %5.1f %5.1f %5.2f %5.2f %5.2f" % (h, o["vis"][k], o["t2"][k], o["td2"][k], rh_pct(o["t2"][k], o["td2"][k]), w, o["tp"][k], o["sf"][k], vis_sm(o["t2"][k], o["td2"][k], w, o["tp"][k], o["sf"][k])))
+    except Exception as e:
+        import traceback; traceback.print_exc()
+_s.exit(0)
 for base in ["https://wx.airplot.net/wx/", "https://wx.airplot.net/wx9/"]:
     try:
         m, o = tile_series(base)
