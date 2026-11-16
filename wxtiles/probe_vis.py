@@ -21,13 +21,15 @@ for back in range(0, 30, 6):
             try: files = [f for f in ls(u) if f.endswith('.index')]
             except Exception as e: print(' ', r, stream, 'no listing'); continue
             if not files: continue
-            f = sorted(files, key=lambda x: (len(x), x))[min(1, len(files) - 1)]
-            name = f.split('/')[-1]
-            idx = S.get(u + name, timeout=60).text.splitlines()
-            params = sorted({json.loads(l).get('param') for l in idx if l.strip()})
+            names = [f.split('/')[-1] for f in files]
+            pick = [n for n in names if '-3h-' in n] or names[:3]  # every file type for one step (surface, levels, ...)
+            params = set()
+            for name in pick:
+                ps = sorted({json.loads(l).get('param') for l in S.get(u + name, timeout=60).text.splitlines() if l.strip()})
+                print(f'    {name}: ' + ' '.join(p for p in ps if p)); params |= set(ps)
+            name = ', '.join(pick)
             has = 'vis' in params
             found_any |= has
             print(f'  {r}/{stream}: {len(files)} steps, sample {name}: {len(params)} params -> vis {"FOUND" if has else "not found"}')
-            print('    params:', ' '.join(p for p in params if p))
     if any(r != '0p25' for r in res): break  # keep going back until a run with the 9 km set
 print('::notice title=ECMWF visibility::' + ('vis FOUND in free open data' if found_any else 'vis NOT in free open data'))
