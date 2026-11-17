@@ -53,6 +53,8 @@ if NINE:
     GRID = (len(TILES9), TP, TP)
 else:
     GRID = (NLAT, NLON)
+LATG = (np.stack([(90 - r * RES)[:, None] * np.ones((1, TP)) for r in _rows]).astype(np.float32) if NINE
+        else ((90 - np.arange(NLAT) * RES)[:, None] * np.ones((1, NLON))).astype(np.float32))
 def cut(g):
     """a whole-globe field on our grid -> what we keep (9 km: the region tiles only)."""
     if not NINE: return g
@@ -97,7 +99,18 @@ VARS = [
     ("r1000", "u1", 1.0, 0.0,    "lin"),   # humidity, %
     ("r925",  "u1", 1.0, 0.0,    "lin"),
     ("tclw",  "u1", 0.01, 0.0,   "sqrt"),  # total column cloud liquid water, kg/m2 (= mm), up to 6.4
+    # (2026-11-16, CN) model icing / turbulence / freezing level (icing_turb.py) for the GFA-style layer - steps up to
+    # DER_MAX_STEP only (missing after). icg = intensity 0-3 (none, LGT, MOD, SEV) + 4 x type (RIME, MXD, CLR);
+    # trb = intensity + 4 x cause (MECH, LEE, WS, CAT); base / top / freezing level in hundreds of ft ASL (scale 2)
+    ("icg",   "u1", 1.0, 0.0,    "lin"),
+    ("icgb",  "u1", 2.0, 0.0,    "lin"),
+    ("icgt",  "u1", 2.0, 0.0,    "lin"),
+    ("trb",   "u1", 1.0, 0.0,    "lin"),
+    ("trbb",  "u1", 2.0, 0.0,    "lin"),
+    ("trbt",  "u1", 2.0, 0.0,    "lin"),
+    ("fzl",   "u1", 2.0, 0.0,    "lin"),
 ]
+DER_MAX_STEP = int(os.environ.get("WX_DER_MAX_STEP", "48"))   # icing / turbulence for these steps (more levels to download)
 MISSING = {"i1": -128, "u1": 255, "i2": -32768}
 LIMITS = {"i1": (-127, 127), "u1": (0, 254), "i2": (-32767, 32767)}
 MS2KT = 1.943844
@@ -195,8 +208,16 @@ def ecmwf():
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
     SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
     PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700}, "gh": {1000, 925, 850, 700}}
+    import icing_turb
+    PLX = {k: set(PL.get(k, set())) | icing_turb.NEED.get(k, set()) for k in set(PL) | set(icing_turb.NEED)}   # + icing / turbulence
+    # (2026-11-16) the model ground height first: icing / turbulence only count levels above the ground
+    try:
+        gfs_c = gfs(run)
+    except Exception as e:
+        log("GFS ground height failed:", e); gfs_c = None
     seen = set()
     def get(step):
+        PLs = PLX if step <= DER_MAX_STEP else PL
         target = "ec_%03d.grib2" % step
         with open(target, "wb") as f:
             for pt in PARTS:
@@ -207,7 +228,7 @@ def ecmwf():
                 for line in idx.splitlines():
                     if not line.strip(): continue
                     j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
-                    if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PL and lev is not None and int(lev) in PL[p]):
+                    if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PLs and lev is not None and int(lev) in PLs[p]):
                         want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
                 want.sort(); ranges = []
                 for o, n in want:   # merge neighbours -> fewer requests
@@ -226,6 +247,8 @@ def ecmwf():
     got = set(sfc_ok + pl_ok)
     import eccodes
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
+    levs = {}  # step -> {(name, level): field} for icing / turbulence (one step at a time, dropped once used)
+    wnose = {} # step -> top of a warm layer aloft over a sub-zero surface (freezing rain once precipitation is known)
     def handle(gid, g):
         sn = eccodes.codes_get(gid, "shortName")
         step = int(eccodes.codes_get(gid, "endStep")) if eccodes.codes_is_defined(gid, "endStep") else int(eccodes.codes_get(gid, "step"))
@@ -233,6 +256,8 @@ def ecmwf():
             return
         k = STEPS.index(step)
         lev = eccodes.codes_get(gid, "level") if eccodes.codes_is_defined(gid, "level") else 0
+        if step <= DER_MAX_STEP and sn in ("t", "r", "gh", "u", "v") and lev in PLX.get(sn, ()):
+            levs.setdefault(k, {})[(sn, lev)] = (g - 273.15 if sn == "t" else g * MS2KT if sn in ("u", "v") else np.clip(g, 0, 100) if sn == "r" else g).astype(np.float32)
         if sn == "2t": data["t2"][k] = g - 273.15
         elif sn == "2d": data["td2"][k] = g - 273.15
         elif sn == "msl": data["msl"][k] = g / 100.0
@@ -248,9 +273,22 @@ def ecmwf():
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (1000, 925, 850, 700): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
+    def derive(k):
+        L = levs.pop(k, {})
+        miss = [key for p in icing_turb.NEED for key in [(p, l) for l in icing_turb.NEED[p]] if key not in L]
+        if miss:
+            log("  step", STEPS[k], "no icing / turbulence - missing", miss[:4]); return
+        try:
+            data["icg"][k], data["icgb"][k], data["icgt"][k] = icing_turb.icing(L, elev, data["tclw"][k], data["cape"][k])
+            data["trb"][k], data["trbb"][k], data["trbt"][k] = icing_turb.turbulence(L, elev, data["u10"][k], data["v10"][k], data["gust"][k], LATG, RES)
+            data["fzl"][k] = icing_turb.freezing_level(L, elev, data["t2"][k])
+            wnose[k] = icing_turb.warm_nose(L, elev, data["t2"][k])
+        except Exception as e:
+            log("  step", STEPS[k], "icing / turbulence failed:", e)
     t0 = time.time(); nf = 0
     for f in files:
         nf += read_grib(f, lambda gid, g: handle(gid, cut(g))); os.remove(f)
+        for k in list(levs): derive(k)   # (each file is one step)
     log("decoded", nf, "fields in", round(time.time() - t0), "s")
     for sn, byk in acc.items():
         prev = None
@@ -259,6 +297,15 @@ def ecmwf():
             if cur is None: continue
             data[sn][k] = np.maximum(0, cur - prev) if prev is not None else 0 * cur
             prev = cur
+    # (2026-11-16) freezing rain: a warm layer aloft over a sub-zero surface, with precipitation -> SEV CLR icing from the surface
+    for k, wz in wnose.items():
+        fz = np.isfinite(wz) & (np.nan_to_num(data["tp"][k]) >= 0.3)
+        if fz.any():
+            data["icg"][k] = np.where(fz, 3 + 4 * 2, data["icg"][k]); data["icgb"][k] = np.where(fz, 0, data["icgb"][k])
+            data["icgt"][k] = np.where(fz, np.maximum(data["icgt"][k], np.nan_to_num(wz) * icing_turb.M2HFT), data["icgt"][k])
+    nd = sum(1 for k in range(NS) if not np.isnan(data["icg"][k]).all())
+    log("icing / turbulence for", nd, "steps; MOD+ icing share at step 12: %.3f, MOD+ turbulence: %.3f" % (
+        float(np.nanmean((data["icg"][min(4, NS - 1)] % 4) >= 2)), float(np.nanmean((data["trb"][min(4, NS - 1)] % 4) >= 2))))
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
@@ -272,7 +319,7 @@ def ecmwf():
         data["gust"][k] = data["gust"][nxt[0] if nxt else prv[-1]]
     log("gust steps filled:", NS - len(have))
     run = run.replace(tzinfo=None)
-    return run, got
+    return run, got, gfs_c
 
 # ── GFS ground height (NOAA, public domain) ──
 _gfs_w = None
@@ -380,6 +427,8 @@ def write_tiles(run, gfs_cycle):
     meta = {
         "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: NOAA GFS",
         "vis": "estimated",
+        "icgTurb": {"maxStep": DER_MAX_STEP, "icgTypes": ["RIME", "MXD", "CLR"], "trbCauses": ["", "MECH", "LEE", "WS", "CAT"],
+                    "note": "model icing / turbulence / freezing level: rules of thumb on ECMWF fields (icing_turb.py), not a forecaster's GFA"},
         "resol": RESOL, "tiles": ["%d_%d" % t for t in TILES9] if NINE else None, "regions": {k: [[min(a), max(a) + TILE], [min(b), max(b) + TILE]] for k, (a, b) in REGIONS.items()} if NINE else None,
         "attribution": "Contains modified ECMWF data, CC BY 4.0.",
         "run": run.strftime("%Y-%m-%dT%H:%MZ"), "gfs": gfs_cycle.strftime("%Y-%m-%dT%H:%MZ") if gfs_cycle else None,
@@ -393,11 +442,7 @@ def write_tiles(run, gfs_cycle):
     log("tiles", n, "total", round(total / 1e6, 1), "MB")
 
 if __name__ == "__main__":
-    run, got = ecmwf()
-    try:
-        c = gfs(run)   # the model ground height only
-    except Exception as e:
-        log("GFS ground height failed:", e); c = None
+    run, got, c = ecmwf()   # (the GFS ground height is read inside, before the decoding - icing / turbulence need it)
     # visibility from ECMWF's own fields (dew-point spread, 10 m wind, rain, snow) - see vis_rules.py
     from vis_rules import vis_sm
     for k in range(NS):
