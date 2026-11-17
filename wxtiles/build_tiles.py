@@ -217,11 +217,9 @@ def ecmwf():
     PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700}, "gh": {1000, 925, 850, 700}}
     import icing_turb
     PLX = {k: set(PL.get(k, set())) | icing_turb.NEED.get(k, set()) for k in set(PL) | set(icing_turb.NEED)}   # + icing / turbulence
-    # (2026-11-16) the model ground height first: icing / turbulence only count levels above the ground
-    try:
-        gfs_c = gfs(run)
-    except Exception as e:
-        log("GFS ground height failed:", e); gfs_c = None
+    # (2026-11-16, CN) the model ground height comes from ECMWF itself now: its surface geopotential "z" (orography,
+    # step 0 only) / g - no GFS any more. Step 0 is decoded first, so icing / turbulence (above the ground only) have it.
+    gfs_c = None
     seen = set()
     def get(step):
         PLs = PLX if step in DSTEPS else PL
@@ -235,7 +233,7 @@ def ecmwf():
                 for line in idx.splitlines():
                     if not line.strip(): continue
                     j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
-                    if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PLs and lev is not None and int(lev) in PLs[p]):
+                    if (j.get("levtype") == "sfc" and (p in SFC or (p == "z" and step == 0))) or (j.get("levtype") == "pl" and p in PLs and lev is not None and int(lev) in PLs[p]):
                         want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
                 want.sort(); ranges = []
                 for o, n in want:   # merge neighbours -> fewer requests
@@ -280,6 +278,9 @@ def ecmwf():
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (1000, 925, 850, 700): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
+        elif sn == "z" and eccodes.codes_get(gid, "typeOfLevel") == "surface":   # orography: geopotential / g
+            global have_elev
+            elev[:] = g / 9.80665; have_elev = True
     def derive(k):
         L = levs.pop(k, {})
         miss = [key for p in icing_turb.NEED for key in [(p, l) for l in icing_turb.NEED[p]] if key not in L]
@@ -460,7 +461,7 @@ def write_tiles(run, gfs_cycle):
                 ng += 1; gtotal += len(blob)
         log("icing / turbulence tiles", ng, "total", round(gtotal / 1e6, 1), "MB")
     meta = {
-        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: NOAA GFS",
+        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: its own orography (surface geopotential)",
         "vis": "estimated",
         "gfa": ({"dir": "g/", "steps": DSTEPS, "icgTypes": ["RIME", "MXD", "CLR"], "trbCauses": ["", "MECH", "LEE", "WS", "CAT"],
                  "vars": [{"name": nme, "type": t, "scale": sc, "offset": off, "tr": tr, "missing": MISSING[t]} for nme, t, sc, off, tr in DVARS],
