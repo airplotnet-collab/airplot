@@ -4,7 +4,7 @@ wxtiles/build_tiles.py - Airplot's own model data for the TAF Map "ECMWF forecas
 
 Downloads the latest ECMWF IFS open-data run (0.25 deg, CC BY 4.0 - commercial use allowed with
 attribution: "ECMWF"), with visibility estimated from its own fields (vis_rules.py - ECMWF open data has no
-visibility) and the model ground height from NOAA GFS (public domain),
+visibility) and the model ground height from ECMWF's own orography,
 and cuts the globe into small 10 x 10 degree tiles the browser can read for any spot:
 
   site/wx/meta.json                      run time, steps, variable list and encodings
@@ -123,7 +123,7 @@ MS2KT = 1.943844
 
 data = {name: np.full((NS,) + GRID, np.nan, dtype=np.float32) for name, *_ in VARS}
 ddata = {name: np.full((len(DSTEPS),) + GRID, np.nan, dtype=np.float32) for name, *_ in DVARS}
-elev = np.zeros(GRID, dtype=np.float32)       # model ground height, m (GFS)
+elev = np.zeros(GRID, dtype=np.float32)       # model ground height, m (ECMWF orography)
 have_elev = False
 
 def to_grid(values, ni, nj, lat0, lon0, dj_pos, res=None):
@@ -217,11 +217,9 @@ def ecmwf():
     PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700}, "gh": {1000, 925, 850, 700}}
     import icing_turb
     PLX = {k: set(PL.get(k, set())) | icing_turb.NEED.get(k, set()) for k in set(PL) | set(icing_turb.NEED)}   # + icing / turbulence
-    # (2026-11-16) the model ground height first: icing / turbulence only count levels above the ground
-    try:
-        gfs_c = gfs(run)
-    except Exception as e:
-        log("GFS ground height failed:", e); gfs_c = None
+    # (2026-11-16, CN) the model ground height comes from ECMWF itself now: its surface geopotential "z" (orography,
+    # step 0 only) / g - no GFS any more. Step 0 is decoded first, so icing / turbulence (above the ground only) have it.
+    gfs_c = None
     seen = set()
     def get(step):
         PLs = PLX if step in DSTEPS else PL
@@ -235,7 +233,7 @@ def ecmwf():
                 for line in idx.splitlines():
                     if not line.strip(): continue
                     j = json.loads(line); p = j.get("param"); lev = j.get("levelist")
-                    if (j.get("levtype") == "sfc" and p in SFC) or (j.get("levtype") == "pl" and p in PLs and lev is not None and int(lev) in PLs[p]):
+                    if (j.get("levtype") == "sfc" and (p in SFC or (p == "z" and step == 0))) or (j.get("levtype") == "pl" and p in PLs and lev is not None and int(lev) in PLs[p]):
                         want.append((int(j["_offset"]), int(j["_length"]))); seen.add(p)
                 want.sort(); ranges = []
                 for o, n in want:   # merge neighbours -> fewer requests
@@ -280,6 +278,9 @@ def ecmwf():
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (1000, 925, 850, 700): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
+        elif sn == "z" and eccodes.codes_get(gid, "typeOfLevel") == "surface":   # orography: geopotential / g
+            global have_elev
+            elev[:] = g / 9.80665; have_elev = True
     def derive(k):
         L = levs.pop(k, {})
         miss = [key for p in icing_turb.NEED for key in [(p, l) for l in icing_turb.NEED[p]] if key not in L]
@@ -336,68 +337,6 @@ def ecmwf():
     log("gust steps filled:", NS - len(have))
     run = run.replace(tzinfo=None)
     return run, got, gfs_c
-
-# ── GFS ground height (NOAA, public domain) ──
-_gfs_w = None
-def gfs_to_ours(g):
-    """a 0.25 deg global field (721 x 1440) -> our grid / region tiles."""
-    global _gfs_w
-    if not NINE: return g
-    if _gfs_w is None:  # where each tile point falls in the 0.25 grid (once)
-        lat = np.stack([90 - r * RES for r in _rows]); lon = np.stack([((c * RES) % 360) - 180 for c in _cols])
-        fy = np.clip((90 - lat) / 0.25, 0, 719.9999); fx = ((lon + 180) / 0.25) % 1440
-        y0 = np.floor(fy).astype(int); x0 = np.floor(fx).astype(int); wy = (fy - y0)[:, :, None]; wx = (fx - x0)[:, None, :]
-        _gfs_w = (y0, x0, (x0 + 1) % 1440, wy, wx)
-    y0, x0, x1, wy, wx = _gfs_w
-    out = []
-    for t in range(len(TILES9)):
-        r0, r1 = y0[t][:, None], (y0[t] + 1)[:, None]; c0, c1 = x0[t][None, :], x1[t][None, :]
-        a = g[r0, c0] * (1 - wy[t]) * (1 - wx[t]) + g[r0, c1] * (1 - wy[t]) * wx[t] + g[r1, c0] * wy[t] * (1 - wx[t]) + g[r1, c1] * wy[t] * wx[t]
-        out.append(a)
-    return np.stack(out).astype(np.float32)
-GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
-def gfs(run_ec):
-    global have_elev
-    # newest GFS cycle that is complete to the hours we need (published ~4.5 h after the cycle)
-    now = dt.datetime.utcnow()
-    for back in range(0, 48, 6):
-        c = (now - dt.timedelta(hours=back)).replace(minute=0, second=0, microsecond=0)
-        c = c.replace(hour=c.hour - c.hour % 6)
-        if c > run_ec: continue  # (2026-11-15) a GFS run newer than the ECMWF one has no data for its first hours
-        need = int((run_ec - c).total_seconds() // 3600) + STEPS[-1]
-        need = min(384, max(0, need - need % 3))
-        url = f"{GFS}/gfs.{c:%Y%m%d}/{c:%H}/atmos/gfs.t{c:%H}z.pgrb2.0p25.f{need:03d}.idx"
-        if requests.head(url, timeout=30).status_code == 200:
-            break
-    else:
-        log("no GFS cycle found - no visibility"); return None
-    log("GFS cycle", c)
-    import eccodes
-    def fetch_raw(fh, pats):   # bytes of the wanted fields (network only - safe in threads)
-        base = f"{GFS}/gfs.{c:%Y%m%d}/{c:%H}/atmos/gfs.t{c:%H}z.pgrb2.0p25.f{fh:03d}"
-        idx = requests.get(base + ".idx", timeout=60)
-        if idx.status_code != 200: return {}
-        lines = idx.text.strip().split("\n"); out = {}
-        for i, line in enumerate(lines):
-            parts = line.split(":")
-            key = parts[3] + ":" + parts[4]
-            if key in pats:
-                start = int(parts[1]); end = int(lines[i + 1].split(":")[1]) - 1 if i + 1 < len(lines) else ""
-                r = requests.get(base, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
-                if r.status_code in (200, 206): out[key] = r.content
-        return out
-    def decode(raw):  # GFS is 0.25 deg: onto our grid (9 km: bilinear to the region tiles' points)
-        fn = "gfs_tmp.grib2"; open(fn, "wb").write(raw); res = {}
-        read_grib(fn, lambda gid, g: res.setdefault("g", g), 0.25); os.remove(fn)
-        g = res.get("g")
-        return None if g is None else gfs_to_ours(g)
-    def fetch(fh, pats):
-        return {k: g for k, g in ((k, decode(b)) for k, b in fetch_raw(fh, pats).items()) if g is not None}
-    f0 = fetch(0, ["HGT:surface"])
-    if "HGT:surface" in f0:
-        elev[:] = f0["HGT:surface"]; have_elev = True
-    # (2026-11-15, CN) no GFS visibility any more: it is estimated from ECMWF's own fields (vis_rules.py)
-    return c
 
 def pack(name, dtype, scale, offset, tr, arr):
     a = np.array(arr, dtype=np.float64)
@@ -460,7 +399,7 @@ def write_tiles(run, gfs_cycle):
                 ng += 1; gtotal += len(blob)
         log("icing / turbulence tiles", ng, "total", round(gtotal / 1e6, 1), "MB")
     meta = {
-        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: NOAA GFS",
+        "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: its own orography (surface geopotential)",
         "vis": "estimated",
         "gfa": ({"dir": "g/", "steps": DSTEPS, "icgTypes": ["RIME", "MXD", "CLR"], "trbCauses": ["", "MECH", "LEE", "WS", "CAT"],
                  "vars": [{"name": nme, "type": t, "scale": sc, "offset": off, "tr": tr, "missing": MISSING[t]} for nme, t, sc, off, tr in DVARS],
@@ -479,7 +418,7 @@ def write_tiles(run, gfs_cycle):
     log("tiles", n, "total", round(total / 1e6, 1), "MB")
 
 if __name__ == "__main__":
-    run, got, c = ecmwf()   # (the GFS ground height is read inside, before the decoding - icing / turbulence need it)
+    run, got, c = ecmwf()   # (c: no second model any more - None)
     # visibility from ECMWF's own fields (dew-point spread, 10 m wind, rain, snow) - see vis_rules.py
     from vis_rules import vis_sm
     for k in range(NS):
