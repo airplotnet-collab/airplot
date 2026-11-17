@@ -113,7 +113,17 @@ DVARS = [
     ("trbb",  "u1", 2.0, 0.0,    "lin"),
     ("trbt",  "u1", 2.0, 0.0,    "lin"),
     ("fzl",   "u1", 2.0, 0.0,    "lin"),
+    # (2026-11-16, CN) model clouds and weather (clouds_wx.py) for the GFA CLDS & WX style layer:
+    # cldc = amount (0 none / FEW, 1 SCT, 2 BKN, 3 OVC) + 4 x type (layer, CU, TCU, CB); base / top hundreds of ft ASL;
+    # wx = intensity (0-3) + 4 x type (RA, SN, FZRA, SHRA, SHSN, TSRA); vis in SM; obsc 0 / 1 BR / 2 FG
+    ("cldc",  "u1", 1.0, 0.0,    "lin"),
+    ("cldb",  "u1", 2.0, 0.0,    "lin"),
+    ("cldt",  "u1", 2.0, 0.0,    "lin"),
+    ("wx",    "u1", 1.0, 0.0,    "lin"),
+    ("vis",   "u1", 0.05, 0.0,   "lin"),
+    ("obsc",  "u1", 1.0, 0.0,    "lin"),
 ]
+WNOSE = {}   # step index -> top of a warm layer aloft over a sub-zero surface (icing_turb.warm_nose)
 DER = os.environ.get("WX_DER", "0" if NINE else "1") == "1"
 DER_MAX_STEP = int(os.environ.get("WX_DER_MAX_STEP", "48"))
 DSTEPS = [h for h in STEPS if h <= DER_MAX_STEP] if DER else []
@@ -253,7 +263,7 @@ def ecmwf():
     import eccodes
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
     levs = {}  # step -> {(name, level): field} for icing / turbulence (one step at a time, dropped once used)
-    wnose = {} # step -> top of a warm layer aloft over a sub-zero surface (freezing rain once precipitation is known)
+    wnose = WNOSE # step -> top of a warm layer aloft over a sub-zero surface (freezing rain once precipitation is known)
     def handle(gid, g):
         sn = eccodes.codes_get(gid, "shortName")
         step = int(eccodes.codes_get(gid, "endStep")) if eccodes.codes_is_defined(gid, "endStep") else int(eccodes.codes_get(gid, "step"))
@@ -292,6 +302,8 @@ def ecmwf():
             ddata["trb"][j], ddata["trbb"][j], ddata["trbt"][j] = icing_turb.turbulence(L, elev, data["u10"][k], data["v10"][k], data["gust"][k], LATG, RES)
             ddata["fzl"][j] = icing_turb.freezing_level(L, elev, data["t2"][k])
             wnose[k] = icing_turb.warm_nose(L, elev, data["t2"][k])
+            import clouds_wx
+            ddata["cldc"][j], ddata["cldb"][j], ddata["cldt"][j] = clouds_wx.clouds(L, elev, data["t2"][k], data["td2"][k], data["lcc"][k], data["mcc"][k], data["cape"][k])
         except Exception as e:
             log("  step", STEPS[k], "icing / turbulence failed:", e)
     t0 = time.time(); nf = 0
@@ -402,6 +414,7 @@ def write_tiles(run, gfs_cycle):
         "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: its own orography (surface geopotential)",
         "vis": "estimated",
         "gfa": ({"dir": "g/", "steps": DSTEPS, "icgTypes": ["RIME", "MXD", "CLR"], "trbCauses": ["", "MECH", "LEE", "WS", "CAT"],
+                 "cldTypes": ["", "CU", "TCU", "CB"], "wxTypes": ["RA", "SN", "FZRA", "SHRA", "SHSN", "TSRA"],
                  "vars": [{"name": nme, "type": t, "scale": sc, "offset": off, "tr": tr, "missing": MISSING[t]} for nme, t, sc, off, tr in DVARS],
                  "order": "per variable: [step][row from north][col from west]",
                  "note": "model icing / turbulence / freezing level: rules of thumb on ECMWF fields (wxtiles/icing_turb.py), not a forecaster's GFA"} if (DSTEPS and not NINE) else None),
@@ -423,6 +436,19 @@ if __name__ == "__main__":
     from vis_rules import vis_sm
     for k in range(NS):
         data["vis"][k] = vis_sm(data["t2"][k], data["td2"][k], np.hypot(data["u10"][k], data["v10"][k]), data["tp"][k], data["sf"][k])
+    # (2026-11-16) model weather (needs the 3 h precipitation and the visibility): the GFA-style cloud & wx layer
+    if DSTEPS:
+        import clouds_wx
+        for j, h in enumerate(DSTEPS):
+            k = STEPS.index(h)
+            ddata["wx"][j], ddata["obsc"][j] = clouds_wx.weather(data["tp"][k], data["sf"][k], data["t2"][k], data["cape"][k], data["vis"][k], WNOSE.get(k))
+            ddata["vis"][j] = data["vis"][k]
+            if np.isnan(ddata["cldc"][j]).all(): ddata["wx"][j] = np.nan; ddata["obsc"][j] = np.nan; ddata["vis"][j] = np.nan   # (no levels for this step)
+        j4 = min(4, len(DSTEPS) - 1)
+        log("cloud / wx at step %d: BKN+ %.3f, CB %.3f, precip %.3f (snow %.3f, FZRA %.3f, TS %.3f), BR/FG %.3f" % (DSTEPS[j4],
+            float(np.nanmean((ddata["cldc"][j4] % 4) >= 2)), float(np.nanmean(ddata["cldc"][j4] // 4 == 3)), float(np.nanmean(ddata["wx"][j4] > 0)),
+            float(np.nanmean(np.isin(ddata["wx"][j4] // 4, (1, 4)) & (ddata["wx"][j4] > 0))), float(np.nanmean((ddata["wx"][j4] // 4 == 2) & (ddata["wx"][j4] > 0))),
+            float(np.nanmean((ddata["wx"][j4] // 4 == 5) & (ddata["wx"][j4] > 0))), float(np.nanmean(ddata["obsc"][j4] > 0))))
     log("visibility estimated from ECMWF fields; share of points under 3 SM at step 12: %.3f" % float(np.nanmean(data["vis"][min(4, NS - 1)] < 3)))
     for name, *_ in VARS:
         miss = int(np.isnan(data[name]).all(axis=tuple(range(1, data[name].ndim))).sum())
