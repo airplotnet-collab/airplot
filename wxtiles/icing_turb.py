@@ -15,7 +15,8 @@ TURBULENCE:
   MECH  - over land, surface wind >= 25 kt or gusts >= 35 kt (SEV: wind >= 40 / gusts >= 50): surface to 3,000 ft above it
   LEE   - mountain waves: ground >= 800 m and 700 hPa wind >= 40 kt (SEV >= 60 kt): surface to 5,000 ft above 700 hPa
   WS    - vertical wind shear between two levels (925 - 500 hPa): MOD >= 8 kt / 1,000 ft, SEV >= 12
-  CAT   - 500 - 250 hPa: the same shear, or the Ellrod index (shear x deformation): MOD >= 8, SEV >= 16 (x 1e-7 s-2)
+  CAT   - 500 - 250 hPa: shear MOD >= 10 / SEV >= 14 kt per 1,000 ft, or the Ellrod index (shear x deformation)
+          MOD >= 12, SEV >= 20 (x 1e-7 s-2)
 FREEZING LEVEL: the lowest height where the temperature drops to 0 C (0 = below freezing at the surface).
 
 Output per grid point (the most severe layer): intensity 0-3 + 4 x type / cause, base and top in hundreds of feet ASL.
@@ -150,12 +151,13 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
         vws = np.hypot(du, dv) / dz_kft                             # kt per 1,000 ft
         inten = np.where(vws >= 12, 3, np.where(vws >= 8, 2, 0))
         cz = 3
-        if a <= 500:   # upper levels: the Ellrod index as well
+        if a <= 500:   # upper levels (the jet): a higher shear, or the Ellrod index
             cz = 4
+            inten = np.where(vws >= 14, 3, np.where(vws >= 10, 2, 0))
             vws_s = np.hypot(du, dv) * KT2MS / np.maximum(zb - za, 100.0)
             de = _deformation((L[("u", a)] + L[("u", b)]) / 2, (L[("v", a)] + L[("v", b)]) / 2, lat, res_deg)
             ti = vws_s * de * 1e7
-            inten = np.maximum(inten, np.where(ti >= 16, 3, np.where(ti >= 8, 2, 0)))
+            inten = np.maximum(inten, np.where(ti >= 20, 3, np.where(ti >= 12, 2, 0)))
         put(np.where(ok, inten, 0), cz, za, zb)
     code = np.where(best > 0, best + 4 * cause, 0)
     return code.astype(np.float32), np.where(best > 0, np.maximum(base, 0) * M2HFT, 0).astype(np.float32), np.where(best > 0, top * M2HFT, 0).astype(np.float32)
