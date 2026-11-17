@@ -7,15 +7,15 @@ of thumb applied to the model, NOT a forecaster's product:
 ICING (each pressure level above the ground, 1000-500 hPa):
   potential = temperature factor x humidity factor
     temperature: 0 at 0 C, full from -2.5 to -12 C, half at -17 C, 0 at -22 C (supercooled water range)
-    humidity:    0 at RH 70 %, full at RH 95 % (cloud)
-  LGT >= 0.55, MOD >= 0.85, SEV: >= 0.95 at -12 C or warmer with a lot of cloud water (column > 0.4 kg/m2)
+  humidity: 0 at RH 80 %, full at 98 %. LGT >= 0.6; MOD >= 0.85 with liquid cloud water in the column (>= 0.15 kg/m2);
+  SEV >= 0.95 at -12 C or warmer with a lot of cloud water (>= 0.5 kg/m2)
   type: RIME (layer colder than -14 C), CLR (-8 C or warmer in convection, CAPE > 100), MXD otherwise
   freezing rain: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation -> SEV CLR from the surface
 TURBULENCE:
-  MECH  - surface wind >= 25 kt or gusts >= 35 kt (SEV: wind >= 40 / gusts >= 50): surface to 3,000 ft above it
+  MECH  - over land, surface wind >= 25 kt or gusts >= 35 kt (SEV: wind >= 40 / gusts >= 50): surface to 3,000 ft above it
   LEE   - mountain waves: ground >= 800 m and 700 hPa wind >= 40 kt (SEV >= 60 kt): surface to 5,000 ft above 700 hPa
-  WS    - vertical wind shear between two levels (925 - 500 hPa): MOD >= 6 kt / 1,000 ft, SEV >= 9
-  CAT   - 500 - 250 hPa: the same shear, or the Ellrod index (shear x deformation): MOD >= 6, SEV >= 12 (x 1e-7 s-2)
+  WS    - vertical wind shear between two levels (925 - 500 hPa): MOD >= 8 kt / 1,000 ft, SEV >= 12
+  CAT   - 500 - 250 hPa: the same shear, or the Ellrod index (shear x deformation): MOD >= 8, SEV >= 16 (x 1e-7 s-2)
 FREEZING LEVEL: the lowest height where the temperature drops to 0 C (0 = below freezing at the surface).
 
 Output per grid point (the most severe layer): intensity 0-3 + 4 x type / cause, base and top in hundreds of feet ASL.
@@ -52,11 +52,12 @@ def icing(L, elev, tclw, cape):
     T = np.stack([L[("t", p)] for p in ILEV]); RH = np.stack([L[("r", p)] for p in ILEV]); Z = np.stack([L[("gh", p)] for p in ILEV])
     above = Z > (elev + 150.0)[None]
     fT = np.clip(-T / 2.5, 0, 1) * np.clip((T + 22.0) / 10.0, 0, 1)
-    fRH = np.clip((RH - 70.0) / 25.0, 0, 1)
+    fRH = np.clip((RH - 80.0) / 18.0, 0, 1)
     pot = np.where(above, fT * fRH, 0.0)
-    inten = np.where(pot >= 0.85, 2, np.where(pot >= 0.55, 1, 0))
     cw = np.nan_to_num(tclw)[None] if tclw is not None else 0.0
-    sev = (pot >= 0.95) & (T >= -12.0) & (cw >= 0.4)
+    # MOD needs liquid cloud water in the column as well (supercooled water - not just a humid layer)
+    inten = np.where((pot >= 0.85) & (cw >= 0.15), 2, np.where(pot >= 0.6, 1, 0))
+    sev = (pot >= 0.95) & (T >= -12.0) & (cw >= 0.5)
     inten = np.where(sev, 3, inten)
     best = inten.max(axis=0)
     # the layer: every level at the best intensity (and LGT levels touching it count for base / top too)
@@ -132,7 +133,8 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
 
     # mechanical
     w10 = np.hypot(np.nan_to_num(u10), np.nan_to_num(v10)); g = np.nan_to_num(gust)
-    mech = np.where((w10 >= 40) | (g >= 50), 3, np.where((w10 >= 25) | (g >= 35), 2, 0))
+    land = elev > 1.0   # (over the sea a strong wind is not "mechanical" turbulence - nothing to trip it)
+    mech = np.where(land, np.where((w10 >= 40) | (g >= 50), 3, np.where((w10 >= 25) | (g >= 35), 2, 0)), 0)
     put(mech, 1, elev * 0, elev + 914.0)
     # mountain waves
     if ("u", 700) in L:
@@ -146,14 +148,14 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
         dz_kft = np.maximum((zb - za) * 3.28084 / 1000.0, 0.5)
         du, dv = L[("u", b)] - L[("u", a)], L[("v", b)] - L[("v", a)]
         vws = np.hypot(du, dv) / dz_kft                             # kt per 1,000 ft
-        inten = np.where(vws >= 9, 3, np.where(vws >= 6, 2, 0))
+        inten = np.where(vws >= 12, 3, np.where(vws >= 8, 2, 0))
         cz = 3
         if a <= 500:   # upper levels: the Ellrod index as well
             cz = 4
             vws_s = np.hypot(du, dv) * KT2MS / np.maximum(zb - za, 100.0)
             de = _deformation((L[("u", a)] + L[("u", b)]) / 2, (L[("v", a)] + L[("v", b)]) / 2, lat, res_deg)
             ti = vws_s * de * 1e7
-            inten = np.maximum(inten, np.where(ti >= 12, 3, np.where(ti >= 6, 2, 0)))
+            inten = np.maximum(inten, np.where(ti >= 16, 3, np.where(ti >= 8, 2, 0)))
         put(np.where(ok, inten, 0), cz, za, zb)
     code = np.where(best > 0, best + 4 * cause, 0)
     return code.astype(np.float32), np.where(best > 0, np.maximum(base, 0) * M2HFT, 0).astype(np.float32), np.where(best > 0, top * M2HFT, 0).astype(np.float32)

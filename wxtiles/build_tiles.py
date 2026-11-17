@@ -316,6 +316,12 @@ def ecmwf():
         nd = sum(1 for j in range(len(DSTEPS)) if not np.isnan(ddata["icg"][j]).all()); j4 = min(4, len(DSTEPS) - 1)
         log("icing / turbulence for", nd, "of", len(DSTEPS), "steps; MOD+ icing share at step %d: %.3f, MOD+ turbulence: %.3f" % (
             DSTEPS[j4], float(np.nanmean((ddata["icg"][j4] % 4) >= 2)), float(np.nanmean((ddata["trb"][j4] % 4) >= 2))))
+        ic, tr = ddata["icg"][j4], ddata["trb"][j4]
+        log("  icing MOD %.3f SEV %.3f | turbulence by cause (MOD+): MECH %.3f LEE %.3f WS %.3f CAT %.3f, SEV %.3f | land 30-60N MOD+ icing %.3f turb %.3f" % (
+            float(np.nanmean(ic % 4 == 2)), float(np.nanmean(ic % 4 == 3)),
+            *[float(np.nanmean((tr % 4 >= 2) & (tr // 4 == c))) for c in (1, 2, 3, 4)], float(np.nanmean(tr % 4 == 3)),
+            float(np.nanmean(((ic % 4) >= 2)[(LATG >= 30) & (LATG <= 60) & (elev > 1)])) if not NINE else 0.0,
+            float(np.nanmean(((tr % 4) >= 2)[(LATG >= 30) & (LATG <= 60) & (elev > 1)])) if not NINE else 0.0))
     # the gust at step 0 is not given (it is the max over the period before): use step 3's
     if np.isnan(data["gust"][0]).all() and NS > 1:
         data["gust"][0] = data["gust"][1]
