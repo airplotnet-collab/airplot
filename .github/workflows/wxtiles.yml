@@ -1,7 +1,7 @@
-name: Model data tiles (ECMWF + GFS visibility)
+name: Model data tiles (ECMWF, ground height from GFS)
 
 # Airplot's own forecast data for the TAF Map "ECMWF forecast" chart (wxmap.html):
-# the latest ECMWF IFS open-data run (0.25 deg, CC BY 4.0) + GFS visibility (NOAA), cut into
+# the latest ECMWF IFS open-data run (0.25 deg, CC BY 4.0) + the model ground height from GFS (NOAA), cut into
 # 10 x 10 degree tiles for the whole globe (wxtiles/build_tiles.py), published with GitHub Pages:
 #   https://wx.airplot.net/wx/meta.json   (Cloudflare R2, main) - and the GitHub Pages copy below (backup):
 #   https://airplotnet-collab.github.io/airplot/wx/meta.json
