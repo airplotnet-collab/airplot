@@ -134,7 +134,7 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
 
     # mechanical
     w10 = np.hypot(np.nan_to_num(u10), np.nan_to_num(v10)); g = np.nan_to_num(gust)
-    land = elev > 1.0   # (over the sea a strong wind is not "mechanical" turbulence - nothing to trip it)
+    land = elev > 5.0   # (over the sea a strong wind is not "mechanical" turbulence - nothing to trip it)
     mech = np.where(land, np.where((w10 >= 40) | (g >= 50), 3, np.where((w10 >= 25) | (g >= 35), 2, 0)), 0)
     put(mech, 1, elev * 0, elev + 914.0)
     # mountain waves
