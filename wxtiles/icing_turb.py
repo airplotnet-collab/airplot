@@ -9,18 +9,20 @@ ICING - every cloud can ice; it MUST hold supercooled droplets, and their supply
 that take them away. The column is read like a tephigram, every 150 m from the ground to 500 hPa (temperature,
 humidity and lift interpolated between the levels):
   cloud: relative humidity >= 90 % (the same rule as the "Model cloud & wx" layer); each separate cloud layer is judged
-  temperature score: above 0 C -> 0; 0 to -15 C -> 1 (most likely); -15 to -20 C -> 1 down to 0.3 (ice nuclei start
-         working); -20 to -30 C -> 0.3 down to 0 (rare, light only); below -30 C -> 0
+  temperature score: above 0 C -> 0; 0 to -15 C -> 1 (most likely); -15 to -20 C -> 1 down to 0.6 (ice nuclei start
+         working - and the model can be a few degrees too cold); -20 to -30 C -> 0.6 down to 0; below -30 C -> 0
   icing share = the depth-weighted score of the layer; cold share = the part of the layer colder than -20 C
   lift (supply), cm/s upward: the larger of ECMWF's vertical velocity (frontal / large-scale) and the wind blowing up
          the model terrain (orographic, fading out 3 km above the ground)
-  MOD: BKN/OVC (the model's low / mid cloud cover >= 50 %), icing share >= 0.5, cold share <= 0.5, >= 3,000 ft of the
-       layer at 0 to -20 C, and either a top warmer than -12 C (no ice falling in from above) or a mean lift over the
-       icing part >= 4 cm/s (>= 8 cm/s when the top is colder than -15 C: ice falling in takes droplets away)
-  SEV: the MOD conditions plus lift >= 13 cm/s, most of the layer at 0 to -10 C and >= 5,000 ft of it at 0 to -20 C
+  (2026-11-21, tuned on CN's examples - Lake Erie MOD RIME at FL190 / -15 C, Gaylord MOD MX under -10 to -15 C tops, a dry
+  Pickle Lake column, a deep cold-topped prairie cloud) - the column is read up to 400 hPa (~FL240, as the GFA):
+  icing part = the cloud from 0 to about -22 C (score >= 0.45), judged on its own even when the cloud goes much colder
+  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 3,000 ft of icing part, mean score there >= 0.6, and a supply of
+       droplets: a cloud top -16 C or warmer (no ice falling in) - or, with a colder top, a mean lift >= 2 cm/s
+       (overrunning keeps the droplets coming while snow falls through)
+  SEV: top -16 C or warmer, lift >= 13 cm/s, the icing part mostly 0 to -10 C, >= 5,000 ft of it, <= half the cloud below -20 C
   no LGT: anything weaker is left out
-  type: RIME - layer cloud, no convection (CAPE < 100), weak lift (< 4 cm/s), and thin (< 4,000 ft) or mostly colder
-               than -10 C (small droplets, little liquid water)
+  type: RIME - stratiform (CAPE < 100) with the icing part averaging -10 C or colder (small droplets)
         CLR  - large drops / SLD:
                FZRA / PL: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation (>= 0.3 mm in 3 h)
                           -> SEV CLR from the surface to the top of the warm layer
@@ -29,8 +31,10 @@ humidity and lift interpolated between the levels):
                      -> SEV CLR through the layer (from the surface when it is below 0 C there)
                CB:  CAPE >= 1000 J/kg with precipitation -> SEV CLR from the freezing level to the -40 C level or the
                     300 hPa height (the CB top), whichever is lower
-               TCU: CAPE 300 - 1000 J/kg with precipitation or lift >= 4 cm/s -> MOD CLR from the freezing level to
-                    the -10 C level (otherwise the layer rules)
+               TCU: cloud reaching about -10 C and either CAPE 300 - 1000 J/kg with precipitation or lift >= 4 cm/s at the
+                    icing levels, or EMBEDDED convection: a saturated stretch >= 2 km deep whose saturated equivalent
+                    potential temperature does not rise with height (moist-neutral / unstable, even with CAPE ~0)
+                    -> MOD CLR from the freezing level to the -10 C level
         MXD  - everything else (the most common on the GFA, e.g. frontal cloud)
   a point keeps its most severe icing (on a tie CLR > MXD > RIME; layers of the same kind are joined: lowest base, highest top)
 TURBULENCE:
@@ -49,8 +53,8 @@ ICG_TYPES = ["RIME", "MXD", "CLR"]                 # icg = intensity + 4 * type
 TRB_CAUSES = ["", "MECH", "LEE", "WS", "CAT"]      # trb = intensity + 4 * cause
 M2HFT = 3.28084 / 100.0                            # metres -> hundreds of feet
 FT = 0.3048
-ILEV = [1000, 925, 850, 700, 600, 500]
-CLEV = [400, 300, 250]                             # above ILEV: temperatures for the CB / TCU isotherms
+ILEV = [1000, 925, 850, 700, 600, 500, 400]   # (2026-11-21) + 400 hPa: icing up to ~FL240, as on the GFA
+CLEV = [300, 250]                                  # above ILEV: temperatures for the CB / TCU isotherms
 TLEV = [925, 850, 700, 600, 500, 400, 300, 250]
 R_EARTH = 6371000.0
 KT2MS = 0.514444
@@ -59,8 +63,8 @@ RD, G0 = 287.05, 9.80665
 # icing limits (see the notes above) - tune here
 ICG = dict(
     cloud_rh=90.0, dz=150.0, cover=50.0,
-    share=0.5, cold=0.5, depth_mod=3000 * FT, depth_sev=5000 * FT, warm_top=-12.0, cold_top=-15.0,
-    lift_mod=4.0, lift_mod_cold=8.0, lift_sev=13.0, frac10_sev=0.5,
+    share=0.5, cold=0.5, depth_mod=3000 * FT, depth_sev=5000 * FT, warm_top=-16.0, icing_score=0.6, main_score=0.45,
+    lift_mod=4.0, lift_cold=2.0, lift_sev=13.0, frac10_sev=0.5, etcu_depth=2000.0, etcu_grad=0.5,
     rime_depth=4000 * FT, rime_t=-10.0, conv=100.0, tcu=300.0, cb=1000.0, precip=0.3,
     fzdz_top=-10.0, fzdz_lo=0.1, fzdz_hi=2.0, fzdz_depth=8000 * FT, low_agl=1981.0, oro_fade=3000.0,
 )
@@ -85,11 +89,33 @@ def _layers(z, i, nlev):
 
 
 def _tscore(T):
-    """supercooled-droplet likelihood from the temperature (C): 0 above 0, 1 at 0 to -15, 0.3 at -20, 0 at -30."""
+    """supercooled-droplet likelihood from the temperature (C): 0 above 0, 1 at 0 to -15, 0.6 at -20, 0 at -30.
+    (2026-11-21) softer below -15 C than before (0.3 at -20): the model can be a few degrees too cold (PIREP MOD RIME at
+    -15 C where the model said -20 C)."""
     s = np.where(T > 0, 0.0, 1.0)
-    s = np.where(T < -15, 1.0 - 0.7 * (-15.0 - T) / 5.0, s)
-    s = np.where(T < -20, 0.3 * np.clip((T + 30.0) / 10.0, 0, 1), s)
+    s = np.where(T < -15, 1.0 - 0.4 * (-15.0 - T) / 5.0, s)
+    s = np.where(T < -20, 0.6 * np.clip((T + 30.0) / 10.0, 0, 1), s)
     return s
+
+
+def _thes(p, T):
+    """saturated equivalent potential temperature (K) at p hPa, T C."""
+    Tk = T + 273.15; es = 6.112 * np.exp(17.67 * T / (T + 243.5)); rs = 0.622 * es / np.maximum(p - es, 1.0)
+    return Tk * (1000.0 / p) ** 0.2854 * np.exp(2.5e6 * rs / (1004.0 * Tk))
+
+
+def embedded_tcu(L, elev):
+    """(2026-11-21) embedded convection from the profile itself (even with CAPE ~0): a saturated stretch (RH >= 90 % at
+    neighbouring levels above the ground) at least etcu_depth m deep whose saturated equivalent potential temperature does
+    not rise with height (<= etcu_grad K per km - moist-neutral or unstable) -> True."""
+    c = ICG; run = np.zeros(elev.shape, np.float32); best = np.zeros(elev.shape, np.float32)
+    for a, b in zip(ILEV[:-1], ILEV[1:]):
+        za, zb = L[("gh", a)], L[("gh", b)]
+        ok = (za > elev + 50.0) & (L[("r", a)] >= c["cloud_rh"]) & (L[("r", b)] >= c["cloud_rh"])
+        grad = (_thes(b, L[("t", b)]) - _thes(a, L[("t", a)])) / np.maximum((zb - za) / 1000.0, 0.1)
+        ok &= grad <= c["etcu_grad"]
+        run = np.where(ok, run + (zb - za), 0.0); best = np.maximum(best, run)
+    return best >= c["etcu_depth"]
 
 
 def isotherm(L, elev, t2, tc, levels=ILEV + CLEV):
@@ -161,7 +187,7 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
     zs = np.arange(z0 + dz / 2, ztop, dz)
     st = {}
     def reset(m=None):
-        for k in ("D", "sd", "cold", "dice", "d10", "lsum", "tsum", "ib", "it", "cb", "ct", "ttop"):
+        for k in ("D", "sd", "cold", "dice", "d10", "lsum", "tsum", "smain", "ib", "it", "cb", "ct", "ttop"):
             v = {"ib": np.inf, "cb": np.inf, "it": -np.inf, "ct": -np.inf}.get(k, 0.0)
             if m is None: st[k] = np.full(shape, v, np.float32)
             else: st[k] = np.where(m, v, st[k]).astype(np.float32)
@@ -175,11 +201,15 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
         lift = st["lsum"] / np.maximum(dice, 1.0); tmean = st["tsum"] / np.maximum(dice, 1.0)
         ttop = st["ttop"]; base_agl = st["cb"] - elev; top_agl = st["ct"] - elev
         cover = np.maximum(np.where(base_agl < c["low_agl"], lc, 0), np.where(top_agl >= c["low_agl"], mc, 0))
-        need = np.where(ttop < c["cold_top"], c["lift_mod_cold"], c["lift_mod"])
-        supply = (ttop >= c["warm_top"]) | (lift >= need)
-        mod = m & (cover >= c["cover"]) & (share >= c["share"]) & (coldf <= c["cold"]) & (dice >= c["depth_mod"]) & supply
-        sev = mod & (lift >= c["lift_sev"]) & (f10 >= c["frac10_sev"]) & (dice >= c["depth_sev"])
-        rime = (cv < c["conv"]) & (lift < c["lift_mod"]) & ((D < c["rime_depth"]) | (tmean < c["rime_t"]))
+        # (2026-11-21) the icing part (0 to about -22 C) is judged on its own: a deep cloud with a cold top still ices in
+        # its lower part. A top at -16 C or warmer (no ice falling in) is enough supply; a colder top needs lift >= 4 cm/s
+        # and never gives SEV. SEV: strong lift, a top -16 C or warmer, mostly 0 to -10 C, deep.
+        smain = st["smain"] / np.maximum(dice, 1.0); f10i = st["d10"] / np.maximum(dice, 1.0)
+        warm = ttop >= c["warm_top"]
+        supply = warm | (lift >= c["lift_cold"])   # cold top: some lift (overrunning ~2 cm/s) keeps the droplets coming
+        mod = m & (cover >= c["cover"]) & (smain >= c["icing_score"]) & (dice >= c["depth_mod"]) & supply
+        sev = mod & warm & (lift >= c["lift_sev"]) & (f10i >= c["frac10_sev"]) & (dice >= c["depth_sev"]) & (coldf <= c["cold"])
+        rime = (cv < c["conv"]) & (tmean <= c["rime_t"])   # stratiform, the icing part mostly -10 C or colder: small droplets
         inten = np.where(sev, 3, np.where(mod, 2, 0)); typ = np.where(rime & ~sev, 0, 1)
         lo = np.maximum(st["ib"], elev); hi = st["it"]
         ok = m & np.isfinite(lo) & np.isfinite(hi)
@@ -189,7 +219,7 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
                 & (share >= c["share"]) & (tp >= c["fzdz_lo"]) & (tp < c["fzdz_hi"]) & (sf < 0.5 * tp) & (cover >= c["cover"]))
         put(np.where(fzdz, 3, 0), 2, np.where(t2 <= 0, elev, np.where(ok, lo, 0)), np.where(ok, st["ct"], 0))
 
-    anycloud = np.zeros(shape, bool)
+    anycloud = np.zeros(shape, bool); c10 = np.zeros(shape, bool); liftice = np.full(shape, -99.0, np.float32)
     for z in zs:
         # interpolate the levels to the height z
         Tz = np.full(shape, np.nan, np.float32); Rz = np.full(shape, np.nan, np.float32); Wz = np.zeros(shape, np.float32)
@@ -206,12 +236,13 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
         if ends.any():
             finish(ends); reset(ends)
         s = np.where(cl, _tscore(Tz), 0)
-        main = cl & (s >= 0.3)          # 0 to -20 C: the icing base / top
+        main = cl & (s >= c["main_score"])   # 0 to about -22 C: the icing part (its base / top are the label)
         st["D"] += np.where(cl, dz, 0); st["sd"] += s * dz
         st["cold"] += np.where(cl & (Tz < -20), dz, 0)
         st["dice"] += np.where(main, dz, 0)
         st["d10"] += np.where(cl & (Tz <= 0) & (Tz >= -10), dz, 0)
-        st["lsum"] += np.where(main, Wz * dz, 0); st["tsum"] += np.where(main, Tz * dz, 0)
+        st["lsum"] += np.where(main, Wz * dz, 0); st["tsum"] += np.where(main, Tz * dz, 0); st["smain"] += np.where(main, s * dz, 0)
+        c10 |= cl & (Tz <= -9.0); liftice = np.maximum(liftice, np.where(main, Wz, -99.0))
         st["cb"] = np.where(cl, np.minimum(st["cb"], z - dz / 2), st["cb"]); st["ct"] = np.where(cl, np.maximum(st["ct"], z + dz / 2), st["ct"])
         st["ib"] = np.where(main, np.minimum(st["ib"], z - dz / 2), st["ib"]); st["it"] = np.where(main, np.maximum(st["it"], z + dz / 2), st["it"])
         st["ttop"] = np.where(cl, Tz, st["ttop"])
@@ -222,14 +253,15 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
     # --- convection: TCU (MOD CLR, freezing level to -10 C) and CB (SEV CLR, freezing level to -40 C / the CB top)
     z0c = isotherm(L, elev, t2, 0.0)
     pr = tp >= c["precip"]
-    liftmax = W.max(axis=0)
     if ("gh", 300) in L:
         z40 = isotherm(L, elev, t2, -40.0); cbtop = L[("gh", 300)]
         cbtop = np.where(np.isfinite(z40), np.minimum(z40, cbtop), cbtop)
         cb = anycloud & (cv >= c["cb"]) & pr & np.isfinite(z0c)
         put(np.where(cb, 3, 0), 2, np.where(cb, z0c, 0), np.where(cb, cbtop, 0))
     z10 = isotherm(L, elev, t2, -10.0)
-    tcu = anycloud & (cv >= c["tcu"]) & (cv < c["cb"]) & (pr | (liftmax >= c["lift_mod"])) & np.isfinite(z0c) & np.isfinite(z10)
+    # (2026-11-21) a real TCU: cloud reaching -10 C, with precipitation or lift at the icing levels
+    tcu = c10 & (cv >= c["tcu"]) & (cv < c["cb"]) & (pr | (liftice >= c["lift_mod"])) & np.isfinite(z0c) & np.isfinite(z10)
+    tcu |= c10 & embedded_tcu(L, elev) & np.isfinite(z0c) & np.isfinite(z10)   # embedded TCU in frontal cloud (no CAPE needed)
     if ("gh", 500) in L:
         z10 = np.minimum(z10, L[("gh", 500)])
     put(np.where(tcu, 2, 0), 2, np.where(tcu, z0c, 0), np.where(tcu, z10, 0))
