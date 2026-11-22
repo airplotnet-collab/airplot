@@ -1,16 +1,38 @@
 """
-wxtiles/icing_turb.py - model icing, turbulence and freezing level from the ECMWF pressure-level fields (2026-11-16, CN).
+wxtiles/icing_turb.py - model icing, turbulence and freezing level from the ECMWF pressure-level fields (2026-11-16, CN;
+icing rewritten 2026-11-21 to follow a forecaster's GFA reasoning).
 
 For the TAF Map's "Model icing & turb" layer, drawn like the Canadian GFA ICG/TURB/FZLVL panel. These are rules
 of thumb applied to the model, NOT a forecaster's product:
 
-ICING (each pressure level above the ground, 1000-500 hPa):
-  potential = temperature factor x humidity factor
-    temperature: 0 at 0 C, full from -2.5 to -12 C, half at -17 C, 0 at -22 C (supercooled water range)
-  humidity: 0 at RH 80 %, full at 98 %. LGT >= 0.6; MOD >= 0.85 with liquid cloud water in the column (>= 0.15 kg/m2);
-  SEV >= 0.95 at -12 C or warmer with a lot of cloud water (>= 0.5 kg/m2)
-  type: RIME (layer colder than -14 C), CLR (-8 C or warmer in convection, CAPE > 100), MXD otherwise
-  freezing rain: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation -> SEV CLR from the surface
+ICING - every cloud can ice; it MUST hold supercooled droplets, and their supply has to keep up with the ice nuclei
+that take them away. The column is read like a tephigram, every 150 m from the ground to 500 hPa (temperature,
+humidity and lift interpolated between the levels):
+  cloud: relative humidity >= 90 % (the same rule as the "Model cloud & wx" layer); each separate cloud layer is judged
+  temperature score: above 0 C -> 0; 0 to -15 C -> 1 (most likely); -15 to -20 C -> 1 down to 0.3 (ice nuclei start
+         working); -20 to -30 C -> 0.3 down to 0 (rare, light only); below -30 C -> 0
+  icing share = the depth-weighted score of the layer; cold share = the part of the layer colder than -20 C
+  lift (supply), cm/s upward: the larger of ECMWF's vertical velocity (frontal / large-scale) and the wind blowing up
+         the model terrain (orographic, fading out 3 km above the ground)
+  MOD: BKN/OVC (the model's low / mid cloud cover >= 50 %), icing share >= 0.5, cold share <= 0.5, >= 3,000 ft of the
+       layer at 0 to -20 C, and either a top warmer than -12 C (no ice falling in from above) or a mean lift over the
+       icing part >= 4 cm/s (>= 8 cm/s when the top is colder than -15 C: ice falling in takes droplets away)
+  SEV: the MOD conditions plus lift >= 13 cm/s, most of the layer at 0 to -10 C and >= 5,000 ft of it at 0 to -20 C
+  no LGT: anything weaker is left out
+  type: RIME - layer cloud, no convection (CAPE < 100), weak lift (< 4 cm/s), and thin (< 4,000 ft) or mostly colder
+               than -10 C (small droplets, little liquid water)
+        CLR  - large drops / SLD:
+               FZRA / PL: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation (>= 0.3 mm in 3 h)
+                          -> SEV CLR from the surface to the top of the warm layer
+               FZDZ: a low stratus layer (base under 6,500 ft above the ground, under 8,000 ft deep) with its top warmer
+                     than -10 C, mostly below 0 C, and light precipitation that is not snow (0.1 - 2 mm in 3 h)
+                     -> SEV CLR through the layer (from the surface when it is below 0 C there)
+               CB:  CAPE >= 1000 J/kg with precipitation -> SEV CLR from the freezing level to the -40 C level or the
+                    300 hPa height (the CB top), whichever is lower
+               TCU: CAPE 300 - 1000 J/kg with precipitation or lift >= 4 cm/s -> MOD CLR from the freezing level to
+                    the -10 C level (otherwise the layer rules)
+        MXD  - everything else (the most common on the GFA, e.g. frontal cloud)
+  a point keeps its most severe icing (on a tie CLR > MXD > RIME; layers of the same kind are joined: lowest base, highest top)
 TURBULENCE:
   MECH  - over land, surface wind >= 25 kt or gusts >= 35 kt (SEV: wind >= 40 / gusts >= 50): surface to 3,000 ft above it
   LEE   - mountain waves: ground >= 800 m and 700 hPa wind >= 40 kt (SEV >= 60 kt): surface to 5,000 ft above 700 hPa
@@ -26,19 +48,33 @@ import numpy as np
 ICG_TYPES = ["RIME", "MXD", "CLR"]                 # icg = intensity + 4 * type
 TRB_CAUSES = ["", "MECH", "LEE", "WS", "CAT"]      # trb = intensity + 4 * cause
 M2HFT = 3.28084 / 100.0                            # metres -> hundreds of feet
+FT = 0.3048
 ILEV = [1000, 925, 850, 700, 600, 500]
+CLEV = [400, 300, 250]                             # above ILEV: temperatures for the CB / TCU isotherms
 TLEV = [925, 850, 700, 600, 500, 400, 300, 250]
 R_EARTH = 6371000.0
 KT2MS = 0.514444
+RD, G0 = 287.05, 9.80665
+
+# icing limits (see the notes above) - tune here
+ICG = dict(
+    cloud_rh=90.0, dz=150.0, cover=50.0,
+    share=0.5, cold=0.5, depth_mod=3000 * FT, depth_sev=5000 * FT, warm_top=-12.0, cold_top=-15.0,
+    lift_mod=4.0, lift_mod_cold=8.0, lift_sev=13.0, frac10_sev=0.5,
+    rime_depth=4000 * FT, rime_t=-10.0, conv=100.0, tcu=300.0, cb=1000.0, precip=0.3,
+    fzdz_top=-10.0, fzdz_lo=0.1, fzdz_hi=2.0, fzdz_depth=8000 * FT, low_agl=1981.0, oro_fade=3000.0,
+)
 
 # the pressure-level fields this needs (for the download list)
 NEED = {
-    "t": set(ILEV),
+    "t": set(ILEV) | set(CLEV),
     "r": set(ILEV),
     "gh": set(ILEV) | set(TLEV),
-    "u": set(TLEV),
-    "v": set(TLEV),
+    "u": set(TLEV) | {1000},
+    "v": set(TLEV) | {1000},
 }
+# wanted but not essential: without it the lift is the orographic part only
+OPTIONAL = {"w": set(ILEV)}
 
 
 def _layers(z, i, nlev):
@@ -48,35 +84,163 @@ def _layers(z, i, nlev):
     return lo, hi
 
 
-def icing(L, elev, tclw, cape):
-    """L[(name, level)] -> (code, base, top) arrays; code = intensity + 4 * type, base / top hundreds of ft ASL."""
+def _tscore(T):
+    """supercooled-droplet likelihood from the temperature (C): 0 above 0, 1 at 0 to -15, 0.3 at -20, 0 at -30."""
+    s = np.where(T > 0, 0.0, 1.0)
+    s = np.where(T < -15, 1.0 - 0.7 * (-15.0 - T) / 5.0, s)
+    s = np.where(T < -20, 0.3 * np.clip((T + 30.0) / 10.0, 0, 1), s)
+    return s
+
+
+def isotherm(L, elev, t2, tc, levels=ILEV + CLEV):
+    """the lowest height (m ASL) where the temperature drops to tc (C) going up; elev when the surface is already
+    colder; nan when it is not reached by the top level."""
+    out = np.where(t2 <= tc, elev, np.nan).astype(np.float32)
+    zb = elev + 2.0; tb = t2.astype(np.float32)
+    done = t2 <= tc
+    for p in levels:
+        if ("t", p) not in L or ("gh", p) not in L: continue
+        T = L[("t", p)]; Z = L[("gh", p)]
+        ok = (Z > zb) & ~done
+        cross = ok & (T <= tc) & (tb > tc)
+        f = np.where(cross, (tb - tc) / np.maximum(tb - T, 1e-6), 0)
+        out = np.where(cross, zb + f * (Z - zb), out); done = done | cross
+        zb = np.where(ok, Z, zb); tb = np.where(ok, T, tb)
+    return out
+
+
+def _lift(L, elev, lat, res_deg):
+    """per ILEV level: upward motion in cm/s - the larger of ECMWF's vertical velocity and the orographic lift
+    (10 m-to-level wind up the terrain slope, fading out oro_fade m above the ground)."""
+    dy = R_EARTH * np.radians(res_deg)
+    dx = np.maximum(R_EARTH * np.cos(np.radians(lat)) * np.radians(res_deg), 1000.0)
+    dh_dx = np.gradient(elev, axis=-1) / dx; dh_dy = -np.gradient(elev, axis=-2) / dy   # rows go north -> south
+    out = []
+    for p in ILEV:
+        Z = L[("gh", p)]
+        agl = np.maximum(Z - elev, 0)
+        oro = (L[("u", p)] * dh_dx + L[("v", p)] * dh_dy) * KT2MS * 100.0 * np.clip(1 - agl / ICG["oro_fade"], 0, 1)
+        if ("w", p) in L:   # omega (Pa/s) -> w (cm/s): w = -omega R T / (p g)
+            wm = -L[("w", p)] * RD * (L[("t", p)] + 273.15) / (p * 100.0 * G0) * 100.0
+        else:
+            wm = np.zeros_like(Z)
+        out.append(np.maximum(wm, oro).astype(np.float32))
+    return np.stack(out)
+
+
+def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
+    """L[(name, level)] -> (code, base, top) arrays; code = intensity + 4 * type (RIME / MXD / CLR), base / top
+    hundreds of ft ASL. tp3 / sf3: precipitation / snowfall (mm) in the 3 h before (None = not known: no FZRA / FZDZ
+    / CB)."""
+    c = ICG; shape = elev.shape
+    t2 = np.nan_to_num(t2, nan=10.0); cv = np.nan_to_num(cape) if cape is not None else np.zeros(shape)
+    tp = np.nan_to_num(tp3) if tp3 is not None else np.zeros(shape)
+    sf = np.nan_to_num(sf3) if sf3 is not None else np.zeros(shape)
+    lc = np.nan_to_num(lcc) if lcc is not None else np.full(shape, 100.0)
+    mc = np.nan_to_num(mcc) if mcc is not None else np.full(shape, 100.0)
     T = np.stack([L[("t", p)] for p in ILEV]); RH = np.stack([L[("r", p)] for p in ILEV]); Z = np.stack([L[("gh", p)] for p in ILEV])
-    above = Z > (elev + 150.0)[None]
-    fT = np.clip(-T / 2.5, 0, 1) * np.clip((T + 22.0) / 10.0, 0, 1)
-    fRH = np.clip((RH - 80.0) / 18.0, 0, 1)
-    pot = np.where(above, fT * fRH, 0.0)
-    cw = np.nan_to_num(tclw)[None] if tclw is not None else 0.0
-    # MOD needs liquid cloud water in the column as well (supercooled water - not just a humid layer)
-    inten = np.where((pot >= 0.85) & (cw >= 0.15), 2, np.where(pot >= 0.6, 1, 0))
-    sev = (pot >= 0.95) & (T >= -12.0) & (cw >= 0.5)
-    inten = np.where(sev, 3, inten)
-    best = inten.max(axis=0)
-    # the layer: every level at the best intensity (and LGT levels touching it count for base / top too)
-    on = (inten >= np.maximum(best, 1)[None]) | ((inten >= 1) & (best >= 1)[None])
-    base = np.full(best.shape, np.inf, dtype=np.float32); top = np.full(best.shape, -np.inf, dtype=np.float32)
-    tsum = np.zeros(best.shape, dtype=np.float32); tn = np.zeros(best.shape, dtype=np.float32)
+    W = _lift(L, elev, lat, res_deg)
     n = len(ILEV)
-    for i in range(n):
-        lo, hi = _layers(Z, i, n)
-        lo = np.maximum(lo, elev)
-        m = on[i]
-        base = np.where(m, np.minimum(base, lo), base); top = np.where(m, np.maximum(top, hi), top)
-        tsum += np.where(m, T[i], 0); tn += m
-    tmean = np.where(tn > 0, tsum / np.maximum(tn, 1), 0)
-    cv = np.nan_to_num(cape) if cape is not None else 0.0
-    typ = np.where(tmean < -14, 0, np.where((tmean >= -8) & (cv > 100), 2, 1))
-    code = np.where(best > 0, best + 4 * typ, 0)
-    base = np.where(best > 0, base * M2HFT, 0); top = np.where(best > 0, top * M2HFT, 0)
+
+    best = np.zeros(shape, np.int8); btyp = np.zeros(shape, np.int8)
+    bb = np.zeros(shape, np.float32); bt = np.zeros(shape, np.float32)
+
+    def put(inten, typ, lo, hi):
+        nonlocal best, btyp, bb, bt
+        inten = np.asarray(inten, np.int8); typ = np.asarray(typ, np.int8)
+        new = (inten > best) | ((inten == best) & (inten > 0) & (typ > btyp))
+        same = (inten == best) & (inten > 0) & ~new
+        bb = np.where(new, lo, np.where(same, np.minimum(bb, lo), bb)).astype(np.float32)
+        bt = np.where(new, hi, np.where(same, np.maximum(bt, hi), bt)).astype(np.float32)
+        best = np.where(new, inten, best); btyp = np.where(new, typ, btyp)
+
+    # --- layer clouds: read the column every dz metres, from just above the lowest ground to the 500 hPa height
+    dz = c["dz"]
+    z0 = max(float(np.nanmin(elev)), 0.0)
+    ztop = float(np.nanmax(Z[-1]))
+    zs = np.arange(z0 + dz / 2, ztop, dz)
+    st = {}
+    def reset(m=None):
+        for k in ("D", "sd", "cold", "dice", "d10", "lsum", "tsum", "ib", "it", "cb", "ct", "ttop"):
+            v = {"ib": np.inf, "cb": np.inf, "it": -np.inf, "ct": -np.inf}.get(k, 0.0)
+            if m is None: st[k] = np.full(shape, v, np.float32)
+            else: st[k] = np.where(m, v, st[k]).astype(np.float32)
+    reset()
+    incl = np.zeros(shape, bool)
+
+    def finish(m):
+        """judge the layers that end at the points m."""
+        D = st["D"]; Dm = np.maximum(D, 1.0); dice = st["dice"]
+        share = st["sd"] / Dm; coldf = st["cold"] / Dm; f10 = st["d10"] / Dm
+        lift = st["lsum"] / np.maximum(dice, 1.0); tmean = st["tsum"] / np.maximum(dice, 1.0)
+        ttop = st["ttop"]; base_agl = st["cb"] - elev; top_agl = st["ct"] - elev
+        cover = np.maximum(np.where(base_agl < c["low_agl"], lc, 0), np.where(top_agl >= c["low_agl"], mc, 0))
+        need = np.where(ttop < c["cold_top"], c["lift_mod_cold"], c["lift_mod"])
+        supply = (ttop >= c["warm_top"]) | (lift >= need)
+        mod = m & (cover >= c["cover"]) & (share >= c["share"]) & (coldf <= c["cold"]) & (dice >= c["depth_mod"]) & supply
+        sev = mod & (lift >= c["lift_sev"]) & (f10 >= c["frac10_sev"]) & (dice >= c["depth_sev"])
+        rime = (cv < c["conv"]) & (lift < c["lift_mod"]) & ((D < c["rime_depth"]) | (tmean < c["rime_t"]))
+        inten = np.where(sev, 3, np.where(mod, 2, 0)); typ = np.where(rime & ~sev, 0, 1)
+        lo = np.maximum(st["ib"], elev); hi = st["it"]
+        ok = m & np.isfinite(lo) & np.isfinite(hi)
+        put(np.where(ok, inten, 0), typ, np.where(ok, lo, 0), np.where(ok, hi, 0))
+        # freezing drizzle: a low, warm-topped stratus layer with light (non-snow) precipitation
+        fzdz = (ok & (base_agl < c["low_agl"]) & (D < c["fzdz_depth"]) & (ttop >= c["fzdz_top"]) & (ttop <= 0)
+                & (share >= c["share"]) & (tp >= c["fzdz_lo"]) & (tp < c["fzdz_hi"]) & (sf < 0.5 * tp) & (cover >= c["cover"]))
+        put(np.where(fzdz, 3, 0), 2, np.where(t2 <= 0, elev, np.where(ok, lo, 0)), np.where(ok, st["ct"], 0))
+
+    anycloud = np.zeros(shape, bool)
+    for z in zs:
+        # interpolate the levels to the height z
+        Tz = np.full(shape, np.nan, np.float32); Rz = np.full(shape, np.nan, np.float32); Wz = np.zeros(shape, np.float32)
+        below = z < Z[0]
+        Tz = np.where(below, T[0], Tz); Rz = np.where(below, RH[0], Rz); Wz = np.where(below, W[0], Wz)
+        for i in range(n - 1):
+            m = (z >= Z[i]) & (z < Z[i + 1])
+            f = np.where(m, (z - Z[i]) / np.maximum(Z[i + 1] - Z[i], 1.0), 0)
+            Tz = np.where(m, T[i] + f * (T[i + 1] - T[i]), Tz)
+            Rz = np.where(m, RH[i] + f * (RH[i + 1] - RH[i]), Rz)
+            Wz = np.where(m, W[i] + f * (W[i + 1] - W[i]), Wz)
+        cl = np.isfinite(Tz) & (z > elev + 50.0) & (Rz >= c["cloud_rh"])
+        ends = incl & ~cl
+        if ends.any():
+            finish(ends); reset(ends)
+        s = np.where(cl, _tscore(Tz), 0)
+        main = cl & (s >= 0.3)          # 0 to -20 C: the icing base / top
+        st["D"] += np.where(cl, dz, 0); st["sd"] += s * dz
+        st["cold"] += np.where(cl & (Tz < -20), dz, 0)
+        st["dice"] += np.where(main, dz, 0)
+        st["d10"] += np.where(cl & (Tz <= 0) & (Tz >= -10), dz, 0)
+        st["lsum"] += np.where(main, Wz * dz, 0); st["tsum"] += np.where(main, Tz * dz, 0)
+        st["cb"] = np.where(cl, np.minimum(st["cb"], z - dz / 2), st["cb"]); st["ct"] = np.where(cl, np.maximum(st["ct"], z + dz / 2), st["ct"])
+        st["ib"] = np.where(main, np.minimum(st["ib"], z - dz / 2), st["ib"]); st["it"] = np.where(main, np.maximum(st["it"], z + dz / 2), st["it"])
+        st["ttop"] = np.where(cl, Tz, st["ttop"])
+        incl = cl; anycloud |= cl
+    if incl.any():
+        finish(incl)
+
+    # --- convection: TCU (MOD CLR, freezing level to -10 C) and CB (SEV CLR, freezing level to -40 C / the CB top)
+    z0c = isotherm(L, elev, t2, 0.0)
+    pr = tp >= c["precip"]
+    liftmax = W.max(axis=0)
+    if ("gh", 300) in L:
+        z40 = isotherm(L, elev, t2, -40.0); cbtop = L[("gh", 300)]
+        cbtop = np.where(np.isfinite(z40), np.minimum(z40, cbtop), cbtop)
+        cb = anycloud & (cv >= c["cb"]) & pr & np.isfinite(z0c)
+        put(np.where(cb, 3, 0), 2, np.where(cb, z0c, 0), np.where(cb, cbtop, 0))
+    z10 = isotherm(L, elev, t2, -10.0)
+    tcu = anycloud & (cv >= c["tcu"]) & (cv < c["cb"]) & (pr | (liftmax >= c["lift_mod"])) & np.isfinite(z0c) & np.isfinite(z10)
+    if ("gh", 500) in L:
+        z10 = np.minimum(z10, L[("gh", 500)])
+    put(np.where(tcu, 2, 0), 2, np.where(tcu, z0c, 0), np.where(tcu, z10, 0))
+
+    # --- freezing rain / ice pellets: a warm layer aloft over a sub-zero surface, with precipitation
+    wz = warm_nose(L, elev, t2)
+    fz = np.isfinite(wz) & pr
+    put(np.where(fz, 3, 0), 2, np.where(fz, elev, 0), np.where(fz, np.nan_to_num(wz), 0))
+
+    code = np.where(best > 0, best + 4 * btyp, 0)
+    base = np.where(best > 0, np.maximum(bb, 0) * M2HFT, 0); top = np.where(best > 0, bt * M2HFT, 0)
     return code.astype(np.float32), base.astype(np.float32), top.astype(np.float32)
 
 
