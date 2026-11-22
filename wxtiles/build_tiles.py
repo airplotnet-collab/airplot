@@ -11,7 +11,7 @@ and cuts the globe into small 10 x 10 degree tiles the browser can read for any 
   site/wx/t/<lat0>_<lon0>.bin            one tile (gzip): header + packed arrays
 
 Tile = 41 x 41 grid points (0.25 deg, edges shared with the neighbours so the page can interpolate),
-every variable for every step (0 - 120 h, every 3 h). Values are packed small (int8 / uint8 / int16
+every variable for every step (0 - 120 h, every 3 h; model icing / turbulence too, in their own g/ tiles). Values are packed small (int8 / uint8 / int16
 with a scale) so the whole globe stays a few hundred MB.
 
 Run by .github/workflows/wxtiles.yml 4 times a day; the output is published with GitHub Pages.
@@ -104,6 +104,19 @@ VARS = [
     ("t1000", "i1", 1.0, 0.0,    "lin"),   # 1000 hPa temperature, deg C
     ("z500",  "i2", 1.0, 0.0,    "lin"),   # 500 hPa height, m ASL
     ("r500",  "u1", 1.0, 0.0,    "lin"),   # 500 hPa humidity, %
+    # (2026-11-21, CN) upper air for the route weather (winds / temperature at cruise), the tephigram and upper-level layers:
+    # winds at 500 / 300 / 250 hPa (~FL180 / FL300 / FL340) in kt (2 kt steps: jet-stream speeds up to 254 kt fit in one byte),
+    # temperature and height at 300 / 250 hPa (500 hPa has them already). At the end, so the fields before keep their place.
+    ("u500",  "i1", 2.0, 0.0,    "lin"),
+    ("v500",  "i1", 2.0, 0.0,    "lin"),
+    ("u300",  "i1", 2.0, 0.0,    "lin"),
+    ("v300",  "i1", 2.0, 0.0,    "lin"),
+    ("u250",  "i1", 2.0, 0.0,    "lin"),
+    ("v250",  "i1", 2.0, 0.0,    "lin"),
+    ("t300",  "i1", 1.0, 0.0,    "lin"),   # deg C
+    ("t250",  "i1", 1.0, 0.0,    "lin"),
+    ("z300",  "i2", 1.0, 0.0,    "lin"),   # m ASL
+    ("z250",  "i2", 1.0, 0.0,    "lin"),
 ]
 # (2026-11-16, CN) model icing / turbulence / freezing level (icing_turb.py) for the TAF Map's GFA-style layer. In tiles
 # of their own (<out>/g/<lat0>_<lon0>.bin - the same layout, these variables only, steps up to DER_MAX_STEP), so the
@@ -120,7 +133,7 @@ DVARS = [
     ("fzl",   "u1", 2.0, 0.0,    "lin"),
 ]
 DER = os.environ.get("WX_DER", "0" if NINE else "1") == "1"
-DER_MAX_STEP = int(os.environ.get("WX_DER_MAX_STEP", "48"))
+DER_MAX_STEP = int(os.environ.get("WX_DER_MAX_STEP", "120"))   # (2026-11-21, CN) every step, as the other fields (was 48)
 DSTEPS = [h for h in STEPS if h <= DER_MAX_STEP] if DER else []
 MISSING = {"i1": -128, "u1": 255, "i2": -32768}
 LIMITS = {"i1": (-127, 127), "u1": (0, 254), "i2": (-32767, 32767)}
@@ -219,7 +232,7 @@ def ecmwf():
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
     SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
-    PL = {"t": {1000, 925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700, 500}, "gh": {1000, 925, 850, 700, 500}}
+    PL = {"t": {1000, 925, 850, 700, 500, 300, 250}, "u": {850, 700, 500, 300, 250}, "v": {850, 700, 500, 300, 250}, "r": {1000, 925, 850, 700, 500}, "gh": {1000, 925, 850, 700, 500, 300, 250}}
     import icing_turb
     NX = {k: icing_turb.NEED.get(k, set()) | icing_turb.OPTIONAL.get(k, set()) for k in set(icing_turb.NEED) | set(icing_turb.OPTIONAL)}
     PLX = {k: set(PL.get(k, set())) | NX.get(k, set()) for k in set(PL) | set(NX)}   # + icing / turbulence (+ vertical velocity)
@@ -280,9 +293,9 @@ def ecmwf():
             data[sn][k] = g * (100.0 if np.nanmax(g) <= 1.5 else 1.0)
         elif sn in ("tp", "sf"): acc.setdefault(sn, {})[k] = g * 1000.0   # m -> mm
         elif sn in ("mucape", "cape"): data["cape"][k] = g
-        elif sn == "t" and lev in (1000, 925, 850, 700, 500): data["t%d" % lev][k] = g - 273.15
-        elif sn == "gh" and lev in (1000, 925, 850, 700, 500): data["z%d" % lev][k] = g
-        elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
+        elif sn == "t" and lev in (1000, 925, 850, 700, 500, 300, 250): data["t%d" % lev][k] = g - 273.15
+        elif sn == "gh" and lev in (1000, 925, 850, 700, 500, 300, 250): data["z%d" % lev][k] = g
+        elif sn in ("u", "v") and lev in (850, 700, 500, 300, 250): data["%s%d" % (sn, lev)][k] = g * MS2KT
         elif sn == "r" and lev in (1000, 925, 850, 700, 500): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
         elif sn == "z" and eccodes.codes_get(gid, "typeOfLevel") == "surface":   # orography: geopotential / g
