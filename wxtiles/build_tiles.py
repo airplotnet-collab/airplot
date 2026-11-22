@@ -117,6 +117,9 @@ VARS = [
     ("t250",  "i1", 1.0, 0.0,    "lin"),
     ("z300",  "i2", 1.0, 0.0,    "lin"),   # m ASL
     ("z250",  "i2", 1.0, 0.0,    "lin"),
+    # (2026-11-21, CN) humidity at 300 / 250 hPa too: dew points up there (wx.html layers, tephigram, route weather)
+    ("r300",  "u1", 1.0, 0.0,    "lin"),
+    ("r250",  "u1", 1.0, 0.0,    "lin"),
 ]
 # (2026-11-16, CN) model icing / turbulence / freezing level (icing_turb.py) for the TAF Map's GFA-style layer. In tiles
 # of their own (<out>/g/<lat0>_<lon0>.bin - the same layout, these variables only, steps up to DER_MAX_STEP), so the
@@ -232,7 +235,7 @@ def ecmwf():
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
     SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
-    PL = {"t": {1000, 925, 850, 700, 500, 300, 250}, "u": {850, 700, 500, 300, 250}, "v": {850, 700, 500, 300, 250}, "r": {1000, 925, 850, 700, 500}, "gh": {1000, 925, 850, 700, 500, 300, 250}}
+    PL = {"t": {1000, 925, 850, 700, 500, 300, 250}, "u": {850, 700, 500, 300, 250}, "v": {850, 700, 500, 300, 250}, "r": {1000, 925, 850, 700, 500, 300, 250}, "gh": {1000, 925, 850, 700, 500, 300, 250}}
     import icing_turb
     NX = {k: icing_turb.NEED.get(k, set()) | icing_turb.OPTIONAL.get(k, set()) for k in set(icing_turb.NEED) | set(icing_turb.OPTIONAL)}
     PLX = {k: set(PL.get(k, set())) | NX.get(k, set()) for k in set(PL) | set(NX)}   # + icing / turbulence (+ vertical velocity)
@@ -296,7 +299,7 @@ def ecmwf():
         elif sn == "t" and lev in (1000, 925, 850, 700, 500, 300, 250): data["t%d" % lev][k] = g - 273.15
         elif sn == "gh" and lev in (1000, 925, 850, 700, 500, 300, 250): data["z%d" % lev][k] = g
         elif sn in ("u", "v") and lev in (850, 700, 500, 300, 250): data["%s%d" % (sn, lev)][k] = g * MS2KT
-        elif sn == "r" and lev in (1000, 925, 850, 700, 500): data["r%d" % lev][k] = np.clip(g, 0, 100)
+        elif sn == "r" and lev in (1000, 925, 850, 700, 500, 300, 250): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
         elif sn == "z" and eccodes.codes_get(gid, "typeOfLevel") == "surface":   # orography: geopotential / g
             global have_elev
