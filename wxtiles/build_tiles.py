@@ -99,6 +99,11 @@ VARS = [
     ("r1000", "u1", 1.0, 0.0,    "lin"),   # humidity, %
     ("r925",  "u1", 1.0, 0.0,    "lin"),
     ("tclw",  "u1", 0.01, 0.0,   "sqrt"),  # total column cloud liquid water, kg/m2 (= mm), up to 6.4
+    # (2026-11-21, CN) upper-level inventory complete: every stored level (1000 / 925 / 850 / 700 / 500 hPa) has its
+    # height, temperature and humidity. Added at the end so the fields before keep their place.
+    ("t1000", "i1", 1.0, 0.0,    "lin"),   # 1000 hPa temperature, deg C
+    ("z500",  "i2", 1.0, 0.0,    "lin"),   # 500 hPa height, m ASL
+    ("r500",  "u1", 1.0, 0.0,    "lin"),   # 500 hPa humidity, %
 ]
 # (2026-11-16, CN) model icing / turbulence / freezing level (icing_turb.py) for the TAF Map's GFA-style layer. In tiles
 # of their own (<out>/g/<lat0>_<lon0>.bin - the same layout, these variables only, steps up to DER_MAX_STEP), so the
@@ -214,9 +219,10 @@ def ecmwf():
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
     SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
-    PL = {"t": {925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700}, "gh": {1000, 925, 850, 700}}
+    PL = {"t": {1000, 925, 850, 700, 500}, "u": {850, 700}, "v": {850, 700}, "r": {1000, 925, 850, 700, 500}, "gh": {1000, 925, 850, 700, 500}}
     import icing_turb
-    PLX = {k: set(PL.get(k, set())) | icing_turb.NEED.get(k, set()) for k in set(PL) | set(icing_turb.NEED)}   # + icing / turbulence
+    NX = {k: icing_turb.NEED.get(k, set()) | icing_turb.OPTIONAL.get(k, set()) for k in set(icing_turb.NEED) | set(icing_turb.OPTIONAL)}
+    PLX = {k: set(PL.get(k, set())) | NX.get(k, set()) for k in set(PL) | set(NX)}   # + icing / turbulence (+ vertical velocity)
     # (2026-11-16, CN) the model ground height comes from ECMWF itself now: its surface geopotential "z" (orography,
     # step 0 only) / g - no GFS any more. Step 0 is decoded first, so icing / turbulence (above the ground only) have it.
     gfs_c = None
@@ -254,6 +260,7 @@ def ecmwf():
     acc = {}   # tp / sf: accumulated since the start -> per 3 h
     levs = {}  # step -> {(name, level): field} for icing / turbulence (one step at a time, dropped once used)
     wnose = {} # step -> top of a warm layer aloft over a sub-zero surface (freezing rain once precipitation is known)
+    nolift = set()
     def handle(gid, g):
         sn = eccodes.codes_get(gid, "shortName")
         step = int(eccodes.codes_get(gid, "endStep")) if eccodes.codes_is_defined(gid, "endStep") else int(eccodes.codes_get(gid, "step"))
@@ -261,7 +268,7 @@ def ecmwf():
             return
         k = STEPS.index(step)
         lev = eccodes.codes_get(gid, "level") if eccodes.codes_is_defined(gid, "level") else 0
-        if step in DSTEPS and sn in ("t", "r", "gh", "u", "v") and lev in PLX.get(sn, ()):
+        if step in DSTEPS and sn in ("t", "r", "gh", "u", "v", "w") and lev in PLX.get(sn, ()):
             levs.setdefault(k, {})[(sn, lev)] = (g - 273.15 if sn == "t" else g * MS2KT if sn in ("u", "v") else np.clip(g, 0, 100) if sn == "r" else g).astype(np.float32)
         if sn == "2t": data["t2"][k] = g - 273.15
         elif sn == "2d": data["td2"][k] = g - 273.15
@@ -273,10 +280,10 @@ def ecmwf():
             data[sn][k] = g * (100.0 if np.nanmax(g) <= 1.5 else 1.0)
         elif sn in ("tp", "sf"): acc.setdefault(sn, {})[k] = g * 1000.0   # m -> mm
         elif sn in ("mucape", "cape"): data["cape"][k] = g
-        elif sn == "t" and lev in (925, 850, 700, 500): data["t%d" % lev][k] = g - 273.15
-        elif sn == "gh" and lev in (1000, 925, 850, 700): data["z%d" % lev][k] = g
+        elif sn == "t" and lev in (1000, 925, 850, 700, 500): data["t%d" % lev][k] = g - 273.15
+        elif sn == "gh" and lev in (1000, 925, 850, 700, 500): data["z%d" % lev][k] = g
         elif sn in ("u", "v") and lev in (850, 700): data["%s%d" % (sn, lev)][k] = g * MS2KT
-        elif sn == "r" and lev in (1000, 925, 850, 700): data["r%d" % lev][k] = np.clip(g, 0, 100)
+        elif sn == "r" and lev in (1000, 925, 850, 700, 500): data["r%d" % lev][k] = np.clip(g, 0, 100)
         elif sn == "tclw": data["tclw"][k] = g
         elif sn == "z" and eccodes.codes_get(gid, "typeOfLevel") == "surface":   # orography: geopotential / g
             global have_elev
@@ -286,9 +293,19 @@ def ecmwf():
         miss = [key for p in icing_turb.NEED for key in [(p, l) for l in icing_turb.NEED[p]] if key not in L]
         if miss:
             log("  step", STEPS[k], "no icing / turbulence - missing", miss[:4]); return
+        if k not in nolift and not any(key[0] == "w" for key in L):
+            nolift.add(k); log("  step", STEPS[k], "no vertical velocity (w) - icing lift is orographic only")
+        # (2026-11-21) precipitation / snowfall in the 3 h before this step (each file is one step, in order, so the
+        # step before is already read): FZRA / FZDZ / CB icing need it
+        def per3h(sn):
+            a = acc.get(sn, {})
+            if k == 0: return np.zeros(GRID, np.float32)
+            if k in a and (k - 1) in a: return np.maximum(0, a[k] - a[k - 1])
+            return None
         try:
             j = DSTEPS.index(STEPS[k])
-            ddata["icg"][j], ddata["icgb"][j], ddata["icgt"][j] = icing_turb.icing(L, elev, data["tclw"][k], data["cape"][k])
+            ddata["icg"][j], ddata["icgb"][j], ddata["icgt"][j] = icing_turb.icing(L, elev, data["t2"][k], data["cape"][k], per3h("tp"), per3h("sf"),
+                                                                                   data["lcc"][k], data["mcc"][k], LATG, RES)
             ddata["trb"][j], ddata["trbb"][j], ddata["trbt"][j] = icing_turb.turbulence(L, elev, data["u10"][k], data["v10"][k], data["gust"][k], LATG, RES)
             ddata["fzl"][j] = icing_turb.freezing_level(L, elev, data["t2"][k])
             wnose[k] = icing_turb.warm_nose(L, elev, data["t2"][k])
@@ -306,18 +323,13 @@ def ecmwf():
             if cur is None: continue
             data[sn][k] = np.maximum(0, cur - prev) if prev is not None else 0 * cur
             prev = cur
-    # (2026-11-16) freezing rain: a warm layer aloft over a sub-zero surface, with precipitation -> SEV CLR icing from the surface
-    for k, wz in wnose.items():
-        j = DSTEPS.index(STEPS[k])
-        fz = np.isfinite(wz) & (np.nan_to_num(data["tp"][k]) >= 0.3)
-        if fz.any():
-            ddata["icg"][j] = np.where(fz, 3 + 4 * 2, ddata["icg"][j]); ddata["icgb"][j] = np.where(fz, 0, ddata["icgb"][j])
-            ddata["icgt"][j] = np.where(fz, np.maximum(ddata["icgt"][j], np.nan_to_num(wz) * icing_turb.M2HFT), ddata["icgt"][j])
+    # (2026-11-21) freezing rain / drizzle icing is worked out in icing_turb.icing now (it gets the 3 h precipitation)
     if DSTEPS:
         nd = sum(1 for j in range(len(DSTEPS)) if not np.isnan(ddata["icg"][j]).all()); j4 = min(4, len(DSTEPS) - 1)
         log("icing / turbulence for", nd, "of", len(DSTEPS), "steps; MOD+ icing share at step %d: %.3f, MOD+ turbulence: %.3f" % (
             DSTEPS[j4], float(np.nanmean((ddata["icg"][j4] % 4) >= 2)), float(np.nanmean((ddata["trb"][j4] % 4) >= 2))))
         ic, tr = ddata["icg"][j4], ddata["trb"][j4]
+        log("  icing by type (MOD+): RIME %.3f MXD %.3f CLR %.3f" % tuple(float(np.nanmean((ic % 4 >= 2) & (ic // 4 == t))) for t in (0, 1, 2)))
         log("  icing MOD %.3f SEV %.3f | turbulence by cause (MOD+): MECH %.3f LEE %.3f WS %.3f CAT %.3f, SEV %.3f | land 30-60N MOD+ icing %.3f turb %.3f" % (
             float(np.nanmean(ic % 4 == 2)), float(np.nanmean(ic % 4 == 3)),
             *[float(np.nanmean((tr % 4 >= 2) & (tr // 4 == c))) for c in (1, 2, 3, 4)], float(np.nanmean(tr % 4 == 3)),
@@ -404,7 +416,7 @@ def write_tiles(run, gfs_cycle):
         "gfa": ({"dir": "g/", "steps": DSTEPS, "icgTypes": ["RIME", "MXD", "CLR"], "trbCauses": ["", "MECH", "LEE", "WS", "CAT"],
                  "vars": [{"name": nme, "type": t, "scale": sc, "offset": off, "tr": tr, "missing": MISSING[t]} for nme, t, sc, off, tr in DVARS],
                  "order": "per variable: [step][row from north][col from west]",
-                 "note": "model icing / turbulence / freezing level: rules of thumb on ECMWF fields (wxtiles/icing_turb.py), not a forecaster's GFA"} if (DSTEPS and not NINE) else None),
+                 "note": "model icing (cloud-based: temperature, lift, convection, freezing precipitation; MOD / SEV only) / turbulence / freezing level: rules of thumb on ECMWF fields (wxtiles/icing_turb.py), not a forecaster's GFA"} if (DSTEPS and not NINE) else None),
         "resol": RESOL, "tiles": ["%d_%d" % t for t in TILES9] if NINE else None, "regions": {k: [[min(a), max(a) + TILE], [min(b), max(b) + TILE]] for k, (a, b) in REGIONS.items()} if NINE else None,
         "attribution": "Contains modified ECMWF data, CC BY 4.0.",
         "run": run.strftime("%Y-%m-%dT%H:%MZ"), "gfs": gfs_cycle.strftime("%Y-%m-%dT%H:%MZ") if gfs_cycle else None,
