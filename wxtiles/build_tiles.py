@@ -120,6 +120,9 @@ VARS = [
     # (2026-11-21, CN) humidity at 300 / 250 hPa too: dew points up there (wx.html layers, tephigram, route weather)
     ("r300",  "u1", 1.0, 0.0,    "lin"),
     ("r250",  "u1", 1.0, 0.0,    "lin"),
+    # (2026-11-22, CN) the 100 m wind (ECMWF 100u / 100v), kt: low-level wind shear against the 10 m wind on the TAF Map
+    ("u100",  "i1", 1.0, 0.0,    "lin"),
+    ("v100",  "i1", 1.0, 0.0,    "lin"),
 ]
 # (2026-11-16, CN) model icing / turbulence / freezing level (icing_turb.py) for the TAF Map's GFA-style layer. In tiles
 # of their own (<out>/g/<lat0>_<lon0>.bin - the same layout, these variables only, steps up to DER_MAX_STEP), so the
@@ -234,7 +237,7 @@ def ecmwf():
     if not run:
         raise SystemExit("no complete ECMWF run found")
     log("ECMWF run", run, stream, "mirrors", [m.split("/")[2] for m in MIRRORS])
-    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw"}
+    SFC = {"2t", "2d", "msl", "10u", "10v", "10fg", "10fg3", "tcc", "lcc", "mcc", "hcc", "tp", "sf", "mucape", "tclw", "100u", "100v"}   # (2026-11-22) + 100 m wind
     PL = {"t": {1000, 925, 850, 700, 500, 300, 250}, "u": {850, 700, 500, 300, 250}, "v": {850, 700, 500, 300, 250}, "r": {1000, 925, 850, 700, 500, 300, 250}, "gh": {1000, 925, 850, 700, 500, 300, 250}}
     import icing_turb
     NX = {k: icing_turb.NEED.get(k, set()) | icing_turb.OPTIONAL.get(k, set()) for k in set(icing_turb.NEED) | set(icing_turb.OPTIONAL)}
@@ -291,6 +294,8 @@ def ecmwf():
         elif sn == "msl": data["msl"][k] = g / 100.0
         elif sn == "10u": data["u10"][k] = g * MS2KT
         elif sn == "10v": data["v10"][k] = g * MS2KT
+        elif sn in ("100u", "u100"): data["u100"][k] = g * MS2KT
+        elif sn in ("100v", "v100"): data["v100"][k] = g * MS2KT
         elif sn in ("10fg", "fg10", "i10fg", "10fg3"): data["gust"][k] = g * MS2KT
         elif sn in ("tcc", "lcc", "mcc", "hcc"):
             data[sn][k] = g * (100.0 if np.nanmax(g) <= 1.5 else 1.0)

@@ -24,10 +24,12 @@ humidity and lift interpolated between the levels):
   no LGT: anything weaker is left out
   type: RIME - stratiform (CAPE < 100) with the icing part averaging -10 C or colder (small droplets)
         CLR  - large drops / SLD:
-               FZRA / PL: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation (>= 0.3 mm in 3 h)
+               FZRA / PL: a warm layer aloft (> +1 C) over a sub-zero surface with precipitation (>= 0.3 mm in 3 h), under
+                          a cloud layer with ice (top -10 C or colder) - snow that melts (2026-11-22)
                           -> SEV CLR from the surface to the top of the warm layer
                FZDZ: a low stratus layer (base under 6,500 ft above the ground, under 8,000 ft deep) with its top warmer
-                     than -10 C, mostly below 0 C, and light precipitation that is not snow (0.1 - 2 mm in 3 h)
+                     than -10 C, mostly below 0 C, and light precipitation (0.1 - 2 mm in 3 h), with no cloud layer
+                     anywhere in the column holding ice (top -10 C or colder: seeder-feeder snow) (2026-11-22)
                      -> SEV CLR through the layer (from the surface when it is below 0 C there)
                CB:  CAPE >= 1000 J/kg with precipitation -> SEV CLR from the freezing level to the -40 C level or the
                     300 hPa height (the CB top), whichever is lower
@@ -214,11 +216,16 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
         lo = np.maximum(st["ib"], elev); hi = st["it"]
         ok = m & np.isfinite(lo) & np.isfinite(hi)
         put(np.where(ok, inten, 0), typ, np.where(ok, lo, 0), np.where(ok, hi, 0))
-        # freezing drizzle: a low, warm-topped stratus layer with light (non-snow) precipitation
-        fzdz = (ok & (base_agl < c["low_agl"]) & (D < c["fzdz_depth"]) & (ttop >= c["fzdz_top"]) & (ttop <= 0)
-                & (share >= c["share"]) & (tp >= c["fzdz_lo"]) & (tp < c["fzdz_hi"]) & (sf < 0.5 * tp) & (cover >= c["cover"]))
-        put(np.where(fzdz, 3, 0), 2, np.where(t2 <= 0, elev, np.where(ok, lo, 0)), np.where(ok, st["ct"], 0))
+        # freezing drizzle: a low, warm-topped stratus layer with light precipitation. (2026-11-22, CN) decided after the
+        # whole column is read: only when NO cloud layer has ice (top -10 C or colder) - snow from a higher layer falling
+        # through it (seeder-feeder) makes it snow; ECMWF's own rain / snow split is no longer used
+        fzdz = (ok & (base_agl < c["low_agl"]) & (D < c["fzdz_depth"]) & (ttop > c["fzdz_top"]) & (ttop <= 0)
+                & (share >= c["share"]) & (tp >= c["fzdz_lo"]) & (tp < c["fzdz_hi"]) & (cover >= c["cover"]))
+        if fzdz.any(): pend.append((fzdz, np.where(t2 <= 0, elev, np.where(ok, lo, 0)), np.where(ok, st["ct"], 0)))
+        icy = m & np.isfinite(st["ct"]) & (ttop <= c["fzdz_top"])
+        iceany[...] = iceany | icy; icetop[...] = np.where(icy, np.maximum(icetop, st["ct"]), icetop)
 
+    pend = []; iceany = np.zeros(shape, bool); icetop = np.full(shape, -np.inf, np.float32)   # (2026-11-22) cloud layers with ice
     anycloud = np.zeros(shape, bool); c10 = np.zeros(shape, bool); liftice = np.full(shape, -99.0, np.float32)
     for z in zs:
         # interpolate the levels to the height z
@@ -249,6 +256,8 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
         incl = cl; anycloud |= cl
     if incl.any():
         finish(incl)
+    for fzdz, lo_, hi_ in pend:
+        put(np.where(fzdz & ~iceany, 3, 0), 2, lo_, hi_)
 
     # --- convection: TCU (MOD CLR, freezing level to -10 C) and CB (SEV CLR, freezing level to -40 C / the CB top)
     z0c = isotherm(L, elev, t2, 0.0)
@@ -266,9 +275,10 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
         z10 = np.minimum(z10, L[("gh", 500)])
     put(np.where(tcu, 2, 0), 2, np.where(tcu, z0c, 0), np.where(tcu, z10, 0))
 
-    # --- freezing rain / ice pellets: a warm layer aloft over a sub-zero surface, with precipitation
-    wz = warm_nose(L, elev, t2)
-    fz = np.isfinite(wz) & pr
+    # --- freezing rain / ice pellets: a warm layer aloft over a sub-zero surface, with precipitation. (2026-11-22, CN) only
+    # with ice to melt: a cloud layer whose top is -10 C or colder, the warm layer below that top
+    wz = warm_nose(L, elev, t2, icetop)
+    fz = np.isfinite(wz) & pr & iceany
     put(np.where(fz, 3, 0), 2, np.where(fz, elev, 0), np.where(fz, np.nan_to_num(wz), 0))
 
     code = np.where(best > 0, best + 4 * btyp, 0)
@@ -276,11 +286,12 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
     return code.astype(np.float32), base.astype(np.float32), top.astype(np.float32)
 
 
-def warm_nose(L, elev, t2):
+def warm_nose(L, elev, t2, below=None):
     """freezing-rain set-up (before precipitation is known): a level above the ground warmer than +1 C over a
-    sub-zero surface -> the top of that warm layer (m), else nan."""
+    sub-zero surface -> the top of that warm layer (m), else nan. below: only levels under this height (the ice cloud's top)."""
     T = np.stack([L[("t", p)] for p in ILEV]); Z = np.stack([L[("gh", p)] for p in ILEV])
     above = Z > (elev + 150.0)[None]
+    if below is not None: above = above & (Z < below[None])
     warm = above & (T > 1.0)
     topz = np.where(warm, Z, -np.inf).max(axis=0)
     return np.where((t2 < 0) & np.isfinite(topz), topz, np.nan).astype(np.float32)
