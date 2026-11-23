@@ -10,13 +10,17 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install numpy requests matplotlib cartopy
-      - run: python wxtiles/gfa_compare.py 2>&1 | tee gfacmp_log.txt
+      - run: pip install numpy requests boto3 eccodes eccodeslib matplotlib cartopy
+      - name: Build the latest run (up to +30 h) with the new AND the old icing / turbulence rules
+        working-directory: wxtiles
+        env: { WX_OUT: '${{ github.workspace }}/site/wx', WX_MAX_STEP: '30', WX_DER_MAX_STEP: '30', WX_OLD: '1' }
+        run: python build_tiles.py 2>&1 | tail -40
+      - run: WX_LOCAL=site/wx python wxtiles/gfa_compare.py 2>&1 | tee gfacmp_log.txt
       - name: Results to the gfa-compare-out branch (images + summary + log)
         if: always()
         run: |

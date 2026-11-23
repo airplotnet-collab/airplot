@@ -46,19 +46,22 @@ def gfa_frames():
                 if img: out.setdefault(geo, []).append((sv, img))
     return out
 
+LOCAL = os.environ.get("WX_LOCAL")   # a local build (site/wx): g/ = new rules, g_old/ = the previous ones
 def get_meta():
+    if LOCAL:
+        m = json.load(open(LOCAL + "/meta.json")); m["_b"] = LOCAL + "/"; return m
     for b in ["https://wx.airplot.net/wx/", "https://airplotnet-collab.github.io/airplot/wx/"]:
         try:
             m = S.get(b + "meta.json", timeout=60).json(); m["_b"] = b; return m
         except Exception as e: print("meta", b, e)
     sys.exit("no model meta")
 
-TILES = {}
+TILES = {}; GDIR = ["g"]
 def tile(m, la, lo):
-    k = (la, lo)
+    k = (GDIR[0], la, lo)
     if k not in TILES:
-        r = S.get(m["_b"] + f"g/{la}_{lo}.bin", params={"r": m["run"] + "_" + m.get("made", "")}, timeout=60)
-        b = r.content
+        if LOCAL: b = open(f"{LOCAL}/{GDIR[0]}/{la}_{lo}.bin", "rb").read()
+        else: b = S.get(m["_b"] + f"g/{la}_{lo}.bin", params={"r": m["run"] + "_" + m.get("made", "")}, timeout=60).content
         if b[:2] == b"\x1f\x8b": b = gzip.decompress(b)
         hl = struct.unpack("<I", b[4:8])[0]; TILES[k] = (json.loads(b[8:8 + hl]), b[8 + hl:])
     return TILES[k]
@@ -92,7 +95,7 @@ def field(m, name, si, la0, la1, lo0, lo1):
                 off += cnt * SZ[v["type"]]
     return lats, lons, A
 
-def draw_model(m, reg, valid, si):
+def draw_model(m, reg, valid, si, tag="model"):
     lo0, lo1, la0, la1 = EXT[reg]
     lats, lons, icg = field(m, "icg", si, la0, la1, lo0, lo1)
     _, _, trb = field(m, "trb", si, la0, la1, lo0, lo1)
@@ -111,8 +114,8 @@ def draw_model(m, reg, valid, si):
     # numbers: share of the area with MOD / SEV icing and turbulence, typical icing base / top
     mi, si_ = np.mean(ii == 2) * 100, np.mean(ii == 3) * 100; mt, st = np.mean(ti == 2) * 100, np.mean(ti == 3) * 100
     sel = ii >= 2; bt = (" icing base %d-%d top %d-%d (00s ft)" % (np.nanpercentile(icgb[sel], 25), np.nanpercentile(icgb[sel], 75), np.nanpercentile(icgt[sel], 25), np.nanpercentile(icgt[sel], 75))) if sel.sum() > 5 else ""
-    ax.set_title(f"MODEL {reg} valid {valid}  (run {m['run']}, +{m['gfa']['steps'][si]}h)\nICG area MOD {mi:.0f}% SEV {si_:.0f}%  TURB MOD {mt:.0f}% SEV {st:.0f}%{bt}\nblue = MOD icing, dark blue = SEV; red / = MOD turb, dark red x = SEV; yellow dashed = freezing level", fontsize=9)
-    fig.savefig(f"{OUT}/{reg}_{valid}_model.png", dpi=90, bbox_inches="tight"); plt.close(fig)
+    ax.set_title(f"{tag.upper()} {reg} valid {valid}  (run {m['run']}, +{m['gfa']['steps'][si]}h)\nICG area MOD {mi:.0f}% SEV {si_:.0f}%  TURB MOD {mt:.0f}% SEV {st:.0f}%{bt}\nblue = MOD icing, dark blue = SEV; red / = MOD turb, dark red x = SEV; yellow dashed = freezing level", fontsize=9)
+    fig.savefig(f"{OUT}/{reg}_{valid}_{tag}.png", dpi=90, bbox_inches="tight"); plt.close(fig)
     return dict(icgMOD=round(mi, 1), icgSEV=round(si_, 1), trbMOD=round(mt, 1), trbSEV=round(st, 1))
 
 def main():
@@ -133,7 +136,11 @@ def main():
             except Exception as e: print(reg, "img", e)
             h = (valid - run).total_seconds() / 3600
             if reg in EXT and h in m["gfa"]["steps"]:
-                try: summ["regions"].setdefault(reg, {})[vs] = draw_model(m, reg, vs, m["gfa"]["steps"].index(h))
+                try:
+                    si = m["gfa"]["steps"].index(h); out = {}
+                    for gd, tag in ([("g", "new"), ("g_old", "old")] if LOCAL else [("g", "model")]):
+                        GDIR[0] = gd; out[tag] = draw_model(m, reg, vs, si, tag)
+                    summ["regions"].setdefault(reg, {})[vs] = out
                 except Exception as e: print(reg, vs, "model draw failed", e)
             else: print(reg, vs, "no model step", h)
     json.dump(summ, open(f"{OUT}/summary.json", "w"), indent=1); print(json.dumps(summ, indent=1))

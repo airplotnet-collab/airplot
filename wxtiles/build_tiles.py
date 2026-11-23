@@ -29,7 +29,7 @@ import time
 import numpy as np
 import requests
 
-STEPS = list(range(0, 121, 3))           # 0 - 120 h every 3 h
+STEPS = list(range(0, int(os.environ.get("WX_MAX_STEP", "120")) + 1, 3))   # 0 - 120 h every 3 h (WX_MAX_STEP: fewer, for a check)
 NS = len(STEPS)
 # (2026-11-15) WX_RES=0p1: the 9 km (0.1 deg) ECMWF data, cut only for the REGIONS below (the world stays 0.25 deg).
 RESOL = os.environ.get("WX_RES", "0p25")
@@ -147,6 +147,8 @@ MS2KT = 1.943844
 
 data = {name: np.full((NS,) + GRID, np.nan, dtype=np.float32) for name, *_ in VARS}
 ddata = {name: np.full((len(DSTEPS),) + GRID, np.nan, dtype=np.float32) for name, *_ in DVARS}
+OLD = os.environ.get("WX_OLD") == "1"   # (check only) the previous rules too, into <out>/g_old/
+dold = {name: np.full((len(DSTEPS),) + GRID, np.nan, dtype=np.float32) for name, *_ in DVARS} if OLD else None
 elev = np.zeros(GRID, dtype=np.float32)       # model ground height, m (ECMWF orography)
 have_elev = False
 
@@ -330,6 +332,11 @@ def ecmwf():
             ddata["trb"][j], ddata["trbb"][j], ddata["trbt"][j] = icing_turb.turbulence(L, elev, data["u10"][k], data["v10"][k], data["gust"][k], LATG, RES)
             ddata["fzl"][j] = icing_turb.freezing_level(L, elev, data["t2"][k])
             wnose[k] = icing_turb.warm_nose(L, elev, data["t2"][k])
+            if OLD:
+                import icing_turb_old as io_
+                dold["icg"][j], dold["icgb"][j], dold["icgt"][j] = io_.icing(L, elev, data["t2"][k], data["cape"][k], per3h("tp"), per3h("sf"), data["lcc"][k], data["mcc"][k], LATG, RES)
+                dold["trb"][j], dold["trbb"][j], dold["trbt"][j] = io_.turbulence(L, elev, data["u10"][k], data["v10"][k], data["gust"][k], LATG, RES)
+                dold["fzl"][j] = ddata["fzl"][j]
         except Exception as e:
             log("  step", STEPS[k], "icing / turbulence failed:", e)
     t0 = time.time(); nf = 0
@@ -431,6 +438,17 @@ def write_tiles(run, gfs_cycle):
                     f.write(blob)
                 ng += 1; gtotal += len(blob)
         log("icing / turbulence tiles", ng, "total", round(gtotal / 1e6, 1), "MB")
+        if OLD:
+            os.makedirs(OUT + "/g_old", exist_ok=True)
+            opk = {name: pack(name, dt_, sc, off, tr, dold[name]) for name, dt_, sc, off, tr in DVARS}
+            for lat0 in range(-90, 90, TILE):
+                r_top = int(round((90 - (lat0 + TILE)) / RES)); rows = np.clip(np.arange(r_top, r_top + TP), 0, NLAT - 1)
+                for lon0 in range(-180, 180, TILE):
+                    c0 = int(round((lon0 + 180) / RES)); cols = (np.arange(c0, c0 + TP)) % NLON
+                    buf = bytearray()
+                    for name, *_ in DVARS: buf += opk[name][:, rows][:, :, cols].tobytes()
+                    hdr = json.dumps({"lat0": lat0, "lon0": lon0, "n": TP, "res": RES}).encode()
+                    with open(f"{OUT}/g_old/{lat0}_{lon0}.bin", "wb") as f: f.write(gzip.compress(struct.pack("<4sI", b"APWX", len(hdr)) + hdr + bytes(buf), 6))
     meta = {
         "source": "ECMWF IFS open data " + ("0.1 deg (9 km)" if NINE else "0.25 deg") + " (CC BY 4.0) - visibility estimated from it (dew-point spread, wind, rain, snow); ground height: its own orography (surface geopotential)",
         "vis": "estimated",

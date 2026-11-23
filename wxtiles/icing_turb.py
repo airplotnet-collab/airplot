@@ -66,7 +66,7 @@ RD, G0 = 287.05, 9.80665
 ICG = dict(
     cloud_rh=90.0, dz=150.0, cover=50.0,
     share=0.5, cold=0.5, depth_mod=3000 * FT, depth_sev=5000 * FT, warm_top=-16.0, icing_score=0.6, main_score=0.45,
-    lift_mod=4.0, lift_cold=2.0, lift_sev=13.0, frac10_sev=0.5, etcu_depth=2000.0, etcu_grad=0.5,
+    lift_mod=4.0, lift_cold=0.5, lift_sev=13.0, frac10_sev=0.5, etcu_depth=2000.0, etcu_grad=0.5,
     rime_depth=4000 * FT, rime_t=-10.0, conv=100.0, tcu=300.0, cb=1000.0, precip=0.3,
     fzdz_top=-10.0, fzdz_lo=0.1, fzdz_hi=2.0, fzdz_depth=8000 * FT, low_agl=1981.0, oro_fade=3000.0,
 )
@@ -257,7 +257,7 @@ def icing(L, elev, t2, cape, tp3, sf3, lcc, mcc, lat, res_deg):
     if incl.any():
         finish(incl)
     for fzdz, lo_, hi_ in pend:
-        put(np.where(fzdz & ~iceany, 3, 0), 2, lo_, hi_)
+        put(np.where(fzdz & ~iceany, 2, 0), 2, lo_, hi_)   # (2026-11-23, CN) MOD CLR, as the GFA ("MX / CLR DUE FZDZ"); SEV is for FZRA
 
     # --- convection: TCU (MOD CLR, freezing level to -10 C) and CB (SEV CLR, freezing level to -40 C / the CB top)
     z0c = isotherm(L, elev, t2, 0.0)
@@ -356,11 +356,19 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
         dz_kft = np.maximum((zb - za) * 3.28084 / 1000.0, 0.5)
         du, dv = L[("u", b)] - L[("u", a)], L[("v", b)] - L[("v", a)]
         vws = np.hypot(du, dv) / dz_kft                             # kt per 1,000 ft
-        inten = np.where(vws >= 12, 3, np.where(vws >= 8, 2, 0))
+        # (2026-11-23, CN, checked against the GFAs of all 7 regions) shear only makes turbulence where the layer is not
+        # too stable: bulk Richardson number Ri = N^2 / S^2 (< 1 MOD, < 0.5 SEV). A strong shear across an inversion or
+        # a frontal layer (cold air under warm) is stable - the long SEV bands the GFA never had.
+        tha = (L[("t", a)] + 273.15) * (1000.0 / a) ** 0.2854; thb = (L[("t", b)] + 273.15) * (1000.0 / b) ** 0.2854
+        dzm = np.maximum(zb - za, 100.0)
+        n2 = G0 / ((tha + thb) / 2) * (thb - tha) / dzm
+        s2 = (np.hypot(du, dv) * KT2MS / dzm) ** 2
+        ri = n2 / np.maximum(s2, 1e-8)
+        inten = np.where((vws >= 12) & (ri < 0.5), 3, np.where((vws >= 8) & (ri < 1.0), 2, 0))
         cz = 3
         if a <= 500:   # upper levels (the jet): a higher shear, or the Ellrod index
             cz = 4
-            inten = np.where(vws >= 14, 3, np.where(vws >= 10, 2, 0))
+            inten = np.where((vws >= 14) & (ri < 0.5), 3, np.where((vws >= 10) & (ri < 1.0), 2, 0))
             vws_s = np.hypot(du, dv) * KT2MS / np.maximum(zb - za, 100.0)
             de = _deformation((L[("u", a)] + L[("u", b)]) / 2, (L[("v", a)] + L[("v", b)]) / 2, lat, res_deg)
             ti = vws_s * de * 1e7
