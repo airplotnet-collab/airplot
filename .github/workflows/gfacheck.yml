@@ -6,7 +6,7 @@ on:
     branches: [gfa-compare]
   workflow_dispatch: {}
 permissions:
-  contents: read
+  contents: write
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -16,7 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install numpy requests matplotlib cartopy
-      - run: python wxtiles/gfa_compare.py
+      - run: python wxtiles/gfa_compare.py 2>&1 | tee gfacmp_log.txt
+      - name: Results to the gfa-compare-out branch (images + summary + log)
+        if: always()
+        run: |
+          mkdir -p /tmp/o && cp -r gfacmp /tmp/o/ && cp gfacmp_log.txt /tmp/o/ || true
+          cd /tmp/o && git init -q && git checkout -q -b gfa-compare-out && git add -A
+          git -c user.name=gfa-check -c user.email=actions@github.com commit -q -m "GFA vs model check output"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gfa-compare-out
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: gfacmp, path: gfacmp, retention-days: 7 }
