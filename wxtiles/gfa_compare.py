@@ -98,7 +98,8 @@ def field(m, name, si, la0, la1, lo0, lo1):
 def draw_model(m, reg, valid, si, tag="model"):
     lo0, lo1, la0, la1 = EXT[reg]
     lats, lons, icg = field(m, "icg", si, la0, la1, lo0, lo1)
-    _, _, trb = field(m, "trb", si, la0, la1, lo0, lo1)
+    _, _, trb = field(m, "trb", si, la0, la1, lo0, lo1); _, _, trbb = field(m, "trbb", si, la0, la1, lo0, lo1)
+    trb = np.where(np.nan_to_num(trbb) < 240, trb, 0)   # the GFA shows up to FL240: turbulence starting above it is left out
     _, _, icgb = field(m, "icgb", si, la0, la1, lo0, lo1); _, _, icgt = field(m, "icgt", si, la0, la1, lo0, lo1)
     _, _, fzl = field(m, "fzl", si, la0, la1, lo0, lo1)
     pc = ccrs.LambertConformal(central_longitude=(lo0 + lo1) / 2, standard_parallels=(49, 77))
