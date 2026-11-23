@@ -20,14 +20,15 @@ def old_urls(reg, out):
     t = calendar.timegm(dt.datetime.utcnow().timetuple()) - 5.6 * 3600   # issued ~0.5 h before its first valid time
     v0 = dt.datetime.utcfromtimestamp(math.ceil(t / 21600) * 21600)
     for k, h in enumerate((0, 6, 12)):
-        u = f"https://flightplanning.navcanada.ca/Latest/gfa/anglais/produits/uprair/gfa/{reg.lower()}/Latest-{reg.lower()}_turbc_{h:03d}.png"
+        code = {"GFACN31": "pa", "GFACN32": "pr", "GFACN33": "oq", "GFACN34": "at", "GFACN35": "nw", "GFACN36": "nu", "GFACN37": "ar"}[reg]
+        u = f"https://aviationweather.gov/data/products/fax/F{h:02d}_canfa_icetb_{code}.gif"   # the same GFA charts, from the US AWC
         out.setdefault(reg, []).append(((v0 + dt.timedelta(hours=h)).strftime("%Y-%m-%d %H:%M"), "URL:" + u))
 
 def gfa_frames():
     out = {}
     for reg, site in SITES.items():
         try:
-            r = S.get("https://plan.navcanada.ca/weather/api/alpha/", params={"site": site, "alpha": "gfa"}, timeout=60)
+            raise RuntimeError("CFPS skipped (refuses GitHub servers) - AWC copy")
             print(reg, "CFPS", r.status_code, r.headers.get("content-type"), r.text[:200].replace("\n", " "))
             js = r.json(); open(f"{OUT}/{reg}_raw.json", "w").write(json.dumps(js)[:200000])
         except Exception as e:
@@ -126,7 +127,9 @@ def main():
             try:
                 r = S.get(img[4:] if img.startswith("URL:") else f"https://plan.navcanada.ca/weather/images/{img}.image", timeout=60)
                 print(reg, vs, "image", r.status_code, r.headers.get("content-type"), len(r.content))
-                if r.ok and r.headers.get("content-type", "").startswith("image"): open(f"{OUT}/{reg}_{vs}_gfa.png", "wb").write(r.content)
+                if r.ok and r.headers.get("content-type", "").startswith("image"):
+                    import io; from PIL import Image
+                    Image.open(io.BytesIO(r.content)).convert("RGB").save(f"{OUT}/{reg}_{vs}_gfa.png")
             except Exception as e: print(reg, "img", e)
             h = (valid - run).total_seconds() / 3600
             if reg in EXT and h in m["gfa"]["steps"]:
