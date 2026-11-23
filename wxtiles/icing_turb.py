@@ -17,9 +17,10 @@ humidity and lift interpolated between the levels):
   (2026-11-21, tuned on CN's examples - Lake Erie MOD RIME at FL190 / -15 C, Gaylord MOD MX under -10 to -15 C tops, a dry
   Pickle Lake column, a deep cold-topped prairie cloud) - the column is read up to 400 hPa (~FL240, as the GFA):
   icing part = the cloud from 0 to about -22 C (score >= 0.45), judged on its own even when the cloud goes much colder
-  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 3,000 ft of icing part, mean score there >= 0.6, and a supply of
-       droplets: a cloud top -16 C or warmer (no ice falling in) - or, with a colder top, a mean lift >= 2 cm/s
-       (overrunning keeps the droplets coming while snow falls through)
+  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 2,000 ft of icing part, mean score there >= 0.6, and a supply of
+       droplets: a cloud top -16 C or warmer (no ice falling in) - or, with a colder top, any lift (mean >= 0.5 cm/s)
+       (2026-11-23, CN: was 3,000 ft and 2 cm/s - checked against the GFAs of all 7 regions, the model missed the broad
+       patchy MOD icing in stratiform cloud)
   SEV: top -16 C or warmer, lift >= 13 cm/s, the icing part mostly 0 to -10 C, >= 5,000 ft of it, <= half the cloud below -20 C
   no LGT: anything weaker is left out
   type: RIME - stratiform (CAPE < 100) with the icing part averaging -10 C or colder (small droplets)
@@ -30,7 +31,8 @@ humidity and lift interpolated between the levels):
                FZDZ: a low stratus layer (base under 6,500 ft above the ground, under 8,000 ft deep) with its top warmer
                      than -10 C, mostly below 0 C, and light precipitation (0.1 - 2 mm in 3 h), with no cloud layer
                      anywhere in the column holding ice (top -10 C or colder: seeder-feeder snow) (2026-11-22)
-                     -> SEV CLR through the layer (from the surface when it is below 0 C there)
+                     -> MOD CLR through the layer (from the surface when it is below 0 C there); SEV CLR when a warm
+                     layer aloft or >= 1 mm in 3 h comes with it (freezing precipitation at a warm front) (2026-11-23)
                CB:  CAPE >= 1000 J/kg with precipitation -> SEV CLR from the freezing level to the -40 C level or the
                     300 hPa height (the CB top), whichever is lower
                TCU: cloud reaching about -10 C and either CAPE 300 - 1000 J/kg with precipitation or lift >= 4 cm/s at the
@@ -45,6 +47,8 @@ TURBULENCE:
   WS    - vertical wind shear between two levels (925 - 500 hPa): MOD >= 8 kt / 1,000 ft, SEV >= 12
   CAT   - 500 - 250 hPa: shear MOD >= 10 / SEV >= 14 kt per 1,000 ft, or the Ellrod index (shear x deformation)
           MOD >= 12, SEV >= 20 (x 1e-7 s-2)
+  (2026-11-23, CN) the shear rules (WS and the CAT shear) only where the layer is not too stable: bulk Richardson number
+          < 1 for MOD, < 0.5 for SEV - a shear across an inversion or a frontal layer gave long SEV bands no GFA had
 FREEZING LEVEL: the lowest height where the temperature drops to 0 C (0 = below freezing at the surface).
 
 Output per grid point (the most severe layer): intensity 0-3 + 4 x type / cause, base and top in hundreds of feet ASL.
