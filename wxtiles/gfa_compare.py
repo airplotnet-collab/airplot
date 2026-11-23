@@ -14,14 +14,24 @@ SITES = {"GFACN31": "CYVR", "GFACN32": "CYYC", "GFACN33": "CYYZ", "GFACN34": "CY
 EXT = {"GFACN31": (-142, -110, 46, 62), "GFACN32": (-124, -86, 47, 62), "GFACN33": (-98, -60, 41, 58), "GFACN34": (-72, -48, 41, 61),
        "GFACN35": (-145, -98, 58, 76), "GFACN36": (-102, -58, 56, 78), "GFACN37": (-135, -55, 70, 84)}
 
+def old_urls(reg, out):
+    # fallback: the older static NAV CANADA addresses - frames 000 / 006 / 012 h of the latest issue
+    import calendar, math
+    t = calendar.timegm(dt.datetime.utcnow().timetuple()) - 5.6 * 3600   # issued ~0.5 h before its first valid time
+    v0 = dt.datetime.utcfromtimestamp(math.ceil(t / 21600) * 21600)
+    for k, h in enumerate((0, 6, 12)):
+        u = f"https://flightplanning.navcanada.ca/Latest/gfa/anglais/produits/uprair/gfa/{reg.lower()}/Latest-{reg.lower()}_turbc_{h:03d}.png"
+        out.setdefault(reg, []).append(((v0 + dt.timedelta(hours=h)).strftime("%Y-%m-%d %H:%M"), "URL:" + u))
+
 def gfa_frames():
     out = {}
     for reg, site in SITES.items():
         try:
             r = S.get("https://plan.navcanada.ca/weather/api/alpha/", params={"site": site, "alpha": "gfa"}, timeout=60)
+            print(reg, "CFPS", r.status_code, r.headers.get("content-type"), r.text[:200].replace("\n", " "))
             js = r.json(); open(f"{OUT}/{reg}_raw.json", "w").write(json.dumps(js)[:200000])
         except Exception as e:
-            print(reg, "GFA fetch failed", e); continue
+            print(reg, "GFA fetch failed", e); old_urls(reg, out); continue
         for d in js.get("data", []):
             try: t = json.loads(d.get("text") or "{}")
             except Exception: continue
@@ -114,8 +124,9 @@ def main():
             except Exception: print(reg, "bad time", sv); continue
             vs = valid.strftime("%d%HZ")
             try:
-                r = S.get(f"https://plan.navcanada.ca/weather/images/{img}.image", timeout=60)
-                open(f"{OUT}/{reg}_{vs}_gfa.png", "wb").write(r.content)
+                r = S.get(img[4:] if img.startswith("URL:") else f"https://plan.navcanada.ca/weather/images/{img}.image", timeout=60)
+                print(reg, vs, "image", r.status_code, r.headers.get("content-type"), len(r.content))
+                if r.ok and r.headers.get("content-type", "").startswith("image"): open(f"{OUT}/{reg}_{vs}_gfa.png", "wb").write(r.content)
             except Exception as e: print(reg, "img", e)
             h = (valid - run).total_seconds() / 3600
             if reg in EXT and h in m["gfa"]["steps"]:
