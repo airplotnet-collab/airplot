@@ -1,0 +1,22 @@
+name: GFA vs model check (test branch only)
+# (2026-11-23, CN) runs only on the gfa-compare branch: NAV CANADA GFA icing / turbulence charts (all 7 regions) next to the
+# model icing / turbulence for the same valid times - artifact "gfacmp". Not for main.
+on:
+  push:
+    branches: [gfa-compare]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy requests matplotlib cartopy
+      - run: python wxtiles/gfa_compare.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: gfacmp, path: gfacmp, retention-days: 7 }
