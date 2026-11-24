@@ -17,7 +17,7 @@ humidity and lift interpolated between the levels):
   (2026-11-21, tuned on CN's examples - Lake Erie MOD RIME at FL190 / -15 C, Gaylord MOD MX under -10 to -15 C tops, a dry
   Pickle Lake column, a deep cold-topped prairie cloud) - the column is read up to 400 hPa (~FL240, as the GFA):
   icing part = the cloud from 0 to about -22 C (score >= 0.45), judged on its own even when the cloud goes much colder
-  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 2,000 ft of icing part, mean score there >= 0.6, and a supply of
+  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 1,500 ft of icing part (2026-11-24: was 2,000 - the north still short), mean score there >= 0.6, and a supply of
        droplets: a cloud top -16 C or warmer (no ice falling in) - or, with a colder top, any lift (mean >= 0.5 cm/s)
        (2026-11-23, CN: was 3,000 ft and 2 cm/s - checked against the GFAs of all 7 regions, the model missed the broad
        patchy MOD icing in stratiform cloud)
@@ -48,7 +48,8 @@ TURBULENCE:
   CAT   - 500 - 250 hPa: shear MOD >= 10 / SEV >= 14 kt per 1,000 ft, or the Ellrod index (shear x deformation)
           MOD >= 12, SEV >= 20 (x 1e-7 s-2)
   (2026-11-23, CN) the shear rules (WS and the CAT shear) only where the layer is not too stable: bulk Richardson number
-          < 1 for MOD, < 0.5 for SEV - a shear across an inversion or a frontal layer gave long SEV bands no GFA had
+          < 1 for MOD, < 0.25 for SEV (2026-11-24: was 0.5) - a shear across an inversion or a frontal layer gave long SEV
+          bands no GFA had; the Ellrod index only where Ri < 2, SEV from 30 (was 20)
 FREEZING LEVEL: the lowest height where the temperature drops to 0 C (0 = below freezing at the surface).
 
 Output per grid point (the most severe layer): intensity 0-3 + 4 x type / cause, base and top in hundreds of feet ASL.
