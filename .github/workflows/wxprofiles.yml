@@ -1,0 +1,60 @@
+name: Model profile tiles (ECMWF, tephigram)
+
+# (2026-11-24, CN) the upper-air profiles for the tephigram (modules/tephi.js on wx.html / wxmap.html):
+# ECMWF IFS open data, 11 pressure levels (1000-150 hPa: temperature, humidity, height, wind), vertical velocity at
+# 850 / 700 / 500 hPa and surface pressure, every 3 h to +120 h, at 0.5 deg, 60 S - 80 N (wxtiles/build_profiles.py).
+# Its own job, separate from the map tiles (wxtiles.yml): the map downloads stay as they are; these are read only
+# when someone opens a tephigram. Cloudflare R2 only (no GitHub Pages copy - Pages keeps the map tiles):
+#   https://wx.airplot.net/wxp/meta.json   and   https://wx.airplot.net/wxp/p/<lat0>_<lon0>.bin
+# Each run overwrites the last (about one run of storage). Runs 20 min after the map tiles.
+on:
+  schedule:
+    - cron: '40 2,8,14,20 * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [profile-tiles]          # test builds on the work branch (built, not uploaded)
+    paths: ['wxtiles/build_profiles.py', '.github/workflows/wxprofiles.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wxprofiles
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy requests boto3 eccodes eccodeslib
+          python -c "import eccodes; print('eccodes', eccodes.codes_get_api_version())"
+
+      - name: Build profile tiles
+        working-directory: wxtiles
+        env:
+          WX_OUT: ${{ github.workspace }}/site/wxp
+        run: python build_profiles.py
+
+      - name: Size
+        run: |
+          du -sh site/wxp; ls site/wxp/p | wc -l; head -c 400 site/wxp/meta.json; echo
+          echo "::notice title=Profile tiles::$(du -sh site/wxp | cut -f1) in $(ls site/wxp/p | wc -l) tiles, run $(python -c "import json;print(json.load(open('site/wxp/meta.json'))['run'])")"
+
+      - name: Upload to Cloudflare R2 (wx.airplot.net/wxp)
+        if: github.ref == 'refs/heads/main'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python wxtiles/upload_r2.py site/wxp wxp
