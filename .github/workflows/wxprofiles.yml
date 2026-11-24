@@ -13,6 +13,7 @@ on:
   workflow_run:
     workflows: ['Model data tiles (ECMWF)']
     types: [completed]
+    branches: [main]                 # only after the real (main) map-tile runs, not their test builds
   workflow_dispatch: {}
   push:
     branches: [profile-tiles]          # test builds on the work branch (built, not uploaded)
