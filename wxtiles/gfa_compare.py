@@ -117,7 +117,9 @@ def draw_model(m, reg, valid, si, tag="model"):
     sel = ii >= 2; bt = (" icing base %d-%d top %d-%d (00s ft)" % (np.nanpercentile(icgb[sel], 25), np.nanpercentile(icgb[sel], 75), np.nanpercentile(icgt[sel], 25), np.nanpercentile(icgt[sel], 75))) if sel.sum() > 5 else ""
     ax.set_title(f"{tag.upper()} {reg} valid {valid}  (run {m['run']}, +{m['gfa']['steps'][si]}h)\nICG area MOD {mi:.0f}% SEV {si_:.0f}%  TURB MOD {mt:.0f}% SEV {st:.0f}%{bt}\nblue = MOD icing, dark blue = SEV; red / = MOD turb, dark red x = SEV; yellow dashed = freezing level", fontsize=9)
     fig.savefig(f"{OUT}/{reg}_{valid}_{tag}.png", dpi=90, bbox_inches="tight"); plt.close(fig)
-    return dict(icgMOD=round(mi, 1), icgSEV=round(si_, 1), trbMOD=round(mt, 1), trbSEV=round(st, 1))
+    tc = np.where(np.isnan(trb), 0, trb) // 4; cz = ["", "MECH", "LEE", "WS", "CAT"]
+    by = {cz[k] + lv: round(float(np.mean((tc == k) & (ti == n)) * 100), 1) for k in range(1, 5) for lv, n in (("_MOD", 2), ("_SEV", 3))}
+    return dict(icgMOD=round(mi, 1), icgSEV=round(si_, 1), trbMOD=round(mt, 1), trbSEV=round(st, 1), trbBy=by)
 
 def main():
     m = get_meta(); run = dt.datetime.strptime(m["run"], "%Y-%m-%dT%H:%MZ")
