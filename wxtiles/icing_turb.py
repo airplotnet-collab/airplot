@@ -17,7 +17,7 @@ humidity and lift interpolated between the levels):
   (2026-11-21, tuned on CN's examples - Lake Erie MOD RIME at FL190 / -15 C, Gaylord MOD MX under -10 to -15 C tops, a dry
   Pickle Lake column, a deep cold-topped prairie cloud) - the column is read up to 400 hPa (~FL240, as the GFA):
   icing part = the cloud from 0 to about -22 C (score >= 0.45), judged on its own even when the cloud goes much colder
-  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 2,000 ft of icing part, mean score there >= 0.6, and a supply of
+  MOD: BKN/OVC (low / mid cloud cover >= 50 %), >= 1,500 ft of icing part (2026-11-24: was 2,000 - the north still short), mean score there >= 0.6, and a supply of
        droplets: a cloud top -16 C or warmer (no ice falling in) - or, with a colder top, any lift (mean >= 0.5 cm/s)
        (2026-11-23, CN: was 3,000 ft and 2 cm/s - checked against the GFAs of all 7 regions, the model missed the broad
        patchy MOD icing in stratiform cloud)
@@ -48,7 +48,8 @@ TURBULENCE:
   CAT   - 500 - 250 hPa: shear MOD >= 10 / SEV >= 14 kt per 1,000 ft, or the Ellrod index (shear x deformation)
           MOD >= 12, SEV >= 20 (x 1e-7 s-2)
   (2026-11-23, CN) the shear rules (WS and the CAT shear) only where the layer is not too stable: bulk Richardson number
-          < 1 for MOD, < 0.5 for SEV - a shear across an inversion or a frontal layer gave long SEV bands no GFA had
+          < 1 for MOD, < 0.25 for SEV (2026-11-24: was 0.5) - a shear across an inversion or a frontal layer gave long SEV
+          bands no GFA had; the Ellrod index only where Ri < 2, SEV from 30 (was 20)
 FREEZING LEVEL: the lowest height where the temperature drops to 0 C (0 = below freezing at the surface).
 
 Output per grid point (the most severe layer): intensity 0-3 + 4 x type / cause, base and top in hundreds of feet ASL.
@@ -69,7 +70,7 @@ RD, G0 = 287.05, 9.80665
 # icing limits (see the notes above) - tune here
 ICG = dict(
     cloud_rh=90.0, dz=150.0, cover=50.0,
-    share=0.5, cold=0.5, depth_mod=2000 * FT, depth_sev=5000 * FT, warm_top=-16.0, icing_score=0.6, main_score=0.45,
+    share=0.5, cold=0.5, depth_mod=1500 * FT, depth_sev=5000 * FT, warm_top=-16.0, icing_score=0.6, main_score=0.45,
     lift_mod=4.0, lift_cold=0.5, lift_sev=13.0, frac10_sev=0.5, etcu_depth=2000.0, etcu_grad=0.5,
     rime_depth=4000 * FT, rime_t=-10.0, conv=100.0, tcu=300.0, cb=1000.0, precip=0.3,
     fzdz_top=-10.0, fzdz_lo=0.1, fzdz_hi=2.0, fzdz_depth=8000 * FT, low_agl=1981.0, oro_fade=3000.0,
@@ -372,15 +373,19 @@ def turbulence(L, elev, u10, v10, gust, lat, res_deg):
         n2 = G0 / ((tha + thb) / 2) * (thb - tha) / dzm
         s2 = (np.hypot(du, dv) * KT2MS / dzm) ** 2
         ri = n2 / np.maximum(s2, 1e-8)
-        inten = np.where((vws >= 12) & (ri < 0.5), 3, np.where((vws >= 8) & (ri < 1.0), 2, 0))
+        # (2026-11-24) SEV only near the overturning limit (Ri < 0.25, Kelvin-Helmholtz) - Ri < 0.5 still gave SEV
+        # bands over BC and Quebec where the GFA had MOD
+        inten = np.where((vws >= 12) & (ri < 0.25), 3, np.where((vws >= 8) & (ri < 1.0), 2, 0))
         cz = 3
         if a <= 500:   # upper levels (the jet): a higher shear, or the Ellrod index
             cz = 4
-            inten = np.where((vws >= 14) & (ri < 0.5), 3, np.where((vws >= 10) & (ri < 1.0), 2, 0))
+            inten = np.where((vws >= 14) & (ri < 0.25), 3, np.where((vws >= 10) & (ri < 1.0), 2, 0))
             vws_s = np.hypot(du, dv) * KT2MS / np.maximum(zb - za, 100.0)
             de = _deformation((L[("u", a)] + L[("u", b)]) / 2, (L[("v", a)] + L[("v", b)]) / 2, lat, res_deg)
             ti = vws_s * de * 1e7
-            inten = np.maximum(inten, np.where(ti >= 20, 3, np.where(ti >= 12, 2, 0)))
+            # (2026-11-24) Ellrod: SEV from 30 (was 20) and only where the layer is not very stable (Ri < 2) - on the
+            # 23-24 Nov GFAs the Ellrod index made most of the SEV CAT, the GFA had MOD CAT there
+            inten = np.maximum(inten, np.where(ri < 2.0, np.where(ti >= 30, 3, np.where(ti >= 12, 2, 0)), 0))
         put(np.where(ok, inten, 0), cz, za, zb)
     code = np.where(best > 0, best + 4 * cause, 0)
     return code.astype(np.float32), np.where(best > 0, np.maximum(base, 0) * M2HFT, 0).astype(np.float32), np.where(best > 0, top * M2HFT, 0).astype(np.float32)
