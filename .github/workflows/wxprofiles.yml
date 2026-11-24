@@ -6,10 +6,13 @@ name: Model profile tiles (ECMWF, tephigram)
 # Its own job, separate from the map tiles (wxtiles.yml): the map downloads stay as they are; these are read only
 # when someone opens a tephigram. Cloudflare R2 only (no GitHub Pages copy - Pages keeps the map tiles):
 #   https://wx.airplot.net/wxp/meta.json   and   https://wx.airplot.net/wxp/p/<lat0>_<lon0>.bin
-# Each run overwrites the last (about one run of storage). Runs 20 min after the map tiles.
+# Each run overwrites the last (about one run of storage).
+# It starts by itself whenever the map-tile job (wxtiles.yml) finishes - its schedule or wxmap's "Rerun model" button -
+# so there is no schedule of its own; "Run workflow" starts it by hand.
 on:
-  schedule:
-    - cron: '40 2,8,14,20 * * *'
+  workflow_run:
+    workflows: ['Model data tiles (ECMWF)']
+    types: [completed]
   workflow_dispatch: {}
   push:
     branches: [profile-tiles]          # test builds on the work branch (built, not uploaded)
